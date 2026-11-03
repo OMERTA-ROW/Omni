@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>OMNI — Mothership Terminal</title>
+<link rel="stylesheet" href="terminal.css"><script src="terminal.js" defer></script>
+</head>
+<body>
+<div class="cosmos" aria-hidden="true"></div><div class="veil" aria-hidden="true"></div>
+<header class="topbar"><a class="identity" href="./" aria-label="OMNI Terminal home"><span class="seal">◎</span> EVOLUTION <span class="divider">/</span> <strong>MOTHERSHIP</strong></a><span class="preview-badge">LOCAL DESIGN PREVIEW</span></header>
+<main>
+<section class="introduction"><div><p class="eyebrow">EVOLUTION / COMMAND DECK</p><h1>OMNI<span class="title-dot">.</span></h1><p class="tagline">One terminal. An expanding universe.</p></div><div class="connection"><span class="hollow-dot"></span><div><strong>Launcher preview</strong><span>Agent transport not connected</span></div></div></section>
+<div class="workspace">
+<aside class="sidebar" aria-label="Sessions and connections">
+<div class="section-heading"><h2>SESSIONS</h2><span id="session-count">01</span></div>
+<div id="sessions" class="sessions"></div>
+<button id="new-session" class="new-session">＋ New local session</button>
+<div class="sidebar-rule"></div><h2>AGENT CONNECTIONS</h2>
+<div class="agent"><span class="agent-mark">O</span><div><strong>OMNI</strong><small>Not connected</small></div><span class="hollow-dot"></span></div>
+<p class="sidebar-note">Live agent sessions will appear here when a supported launcher connection is available.</p>
+<div class="sidebar-bottom"><span class="tiny-orbit">◎</span><p>YOUR EXISTING CLI<br><strong>Still yours. Unchanged.</strong></p></div>
+</aside>
+<section class="terminal" aria-label="OMNI terminal">
+<div class="terminal-toolbar"><div><span class="gold-indicator">⌘</span><strong id="session-title">Command deck 01</strong><span class="local-label">LOCAL</span></div><button id="clear" title="Clear this session's visible output">Clear view</button></div>
+<nav class="view-tabs" aria-label="Session views"><button data-view="terminal" aria-pressed="true">Terminal</button><button data-view="history" aria-pressed="false">History <span id="history-count">0</span></button><button data-view="logs" aria-pressed="false">Logs</button><span class="transport">Transport offline</span></nav>
+<div id="transcript" class="transcript" role="region" aria-label="Terminal output" tabindex="0"></div>
+<form id="command-form" autocomplete="off"><label for="command">OMNI <span>›</span></label><input id="command" name="command" maxlength="2000" placeholder="Type help to explore the command deck" spellcheck="false" autocapitalize="off" aria-describedby="input-hint"><button type="submit" aria-label="Run preview command">↵</button></form>
+<div class="terminal-footer"><span id="input-hint">↑ ↓ history <span class="footer-divider">/</span> Local UI commands only</span><span>NO AGENTS CONNECTED</span></div>
+</section>
+</div>
+<footer class="page-footer"><span>OMNI <span class="footer-divider">/</span> EVOLUTION MOTHERSHIP</span><span>Session data stays in this tab · clears on reload</span><span>OWNER REVIEW <span class="gold-text">01</span></span></footer>
+</main><div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+</body></html>

@@ -23,3 +23,7 @@ No open-source license has been selected. Public visibility does not grant an op
 The source now includes a black-and-gold OMNI banner for interactive help/startup. Actual colors depend on terminal ANSI support. Set `OMNI_ANIMATE=1` to opt into a brief orbit animation; it is off by default. Set `NO_COLOR` to disable branding. Redirected output, JSON, and TERM=dumb stay plain. The terminal's global theme is unchanged.
 
 This presentation change has not been compiled or runtime-tested here because a Go toolchain is unavailable. It does not enable the planned AI features.
+
+## Mothership launcher design preview
+
+Open the local [OMNI Terminal preview](terminal/README.md) for the original Evolution artwork, gold command deck, per-session history and interface logs. This additive browser view does not change `omni`, install a launcher, or connect agents or a shell. See [artwork provenance](terminal/ASSET-PROVENANCE.md).
