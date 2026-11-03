@@ -25,3 +25,7 @@ The host needs `git` and `go`. The values of `OMNI_API_KEY` and `OMNI_CALLBACK_S
 
 ## Test
 `go test ./...`. The worker tests need `git` and `go` on PATH.
+
+## OMNI-initiated secure link (separate opt-in)
+
+See [SECURE-LINK.md](SECURE-LINK.md) for the scoped, time-limited Jackboy handshake and fixed protocol-test job client. This does not activate the legacy worker above. A throwaway checkout alone is not a security sandbox for untrusted repository code.
