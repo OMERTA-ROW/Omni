@@ -13,7 +13,9 @@ Provide these values using the host's managed secret/config store:
 - `OMNI_LINK_BOOTSTRAP_KEY`, `OMNI_LINK_HMAC_SECRET`: new independent random 32-byte hex secrets, matching Jackboy's scoped link only. Never reuse legacy keys or GitHub App/installation/CODE credentials.
 - `OMNI_LINK_AUDIT_DIR`: existing absolute directory, private mode 0700. Events append to mode-0600 `link.jsonl`; do not use a shared or symlink directory. Events contain timestamps, fixed state names and job UUIDs, never keys, signatures, request bodies or session tokens.
 
-Build from `inbox/`: `go build -o <absolute-staging-path>/omni-link ./cmd/omni-link` using Go 1.25+. No binary is installed on PATH.
+The root Docker image builds and includes `omni-link` at `/usr/local/bin/omni-link` alongside `omni-inbox`. The image's default command remains `omni-inbox`; invoke `omni-link` only as an explicit owner-approved one-off command (for example, through the host's one-off run feature). Do not set it as the service's automatic startup command: it is a one-shot CLI, not a daemon.
+
+For a standalone build from `inbox/`, use `go build -o <absolute-staging-path>/omni-link ./cmd/omni-link` with Go 1.25+. No binary is installed on PATH outside the Docker image.
 
 After separate owner activation approval:
 
