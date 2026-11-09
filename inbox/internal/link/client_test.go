@@ -169,3 +169,116 @@ func TestUntrustedTLSIsRejected(t *testing.T) {
 		t.Fatal("sent credentials over untrusted TLS")
 	}
 }
+
+func replyServer(t *testing.T, onHandshake func(), onOp func(action string, w http.ResponseWriter) (handled bool)) *httptest.Server {
+	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		var input map[string]string
+		json.Unmarshal(data, &input)
+		n := r.Header.Get("X-Omni-Nonce")
+		out := Reply{Contract: Contract, RequestNonce: n}
+		status := 200
+		if input["action"] == "handshake" {
+			if onHandshake != nil {
+				onHandshake()
+			}
+			out.SessionToken = strings.Repeat("a", 64)
+			out.ExpiresAt = time.Now().Add(4 * time.Minute)
+			out.Ready = true
+			out.Capabilities = []string{"protocol.self-test", "jobs.read", "jobs.cancel"}
+		} else {
+			if onOp(input["action"], w) {
+				return
+			}
+			out.Job = &Job{ID: input["jobId"], Status: "queued"}
+			status = 202
+		}
+		body, _ := json.Marshal(out)
+		w.Header().Set("X-Omni-Proof", inbox.HMACHex(strings.Repeat("s", 64), Contract+"\nresponse\n"+n+"\n"+fmt.Sprint(status)+"\n"+string(body)))
+		w.WriteHeader(status)
+		w.Write(body)
+	}))
+}
+func scaled(t *testing.T, s *httptest.Server) *Client {
+	c, err := New(s.URL, "omni", project, strings.Repeat("b", 64), strings.Repeat("s", 64), audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.HTTP = s.Client()
+	c.requestLimit, c.handshakeLimit = 300*time.Millisecond, 2*time.Second
+	return c
+}
+func TestTimeoutConstants(t *testing.T) {
+	if HandshakeTimeout != 10*time.Second || RequestTimeout != 5*time.Second {
+		t.Fatal("timeouts changed")
+	}
+	c := &Client{}
+	if c.limit("handshake") != 10*time.Second || c.limit("submit") != 5*time.Second || c.limit("status") != 5*time.Second || c.limit("cancel") != 5*time.Second {
+		t.Fatal("wrong default limits")
+	}
+	c.requestLimit, c.handshakeLimit = time.Hour, time.Hour
+	if c.limit("handshake") != HandshakeTimeout || c.limit("run") != RequestTimeout {
+		t.Fatal("limits must not exceed caps")
+	}
+}
+func TestSlowHandshakeSucceedsWithinHandshakeTimeout(t *testing.T) {
+	var ops atomic.Int32
+	s := replyServer(t, func() { time.Sleep(900 * time.Millisecond) }, func(string, http.ResponseWriter) bool { ops.Add(1); return false })
+	defer s.Close()
+	c := scaled(t, s) // 900ms exceeds the 300ms request limit but not the 2s handshake limit
+	r, err := c.Do(context.Background(), "submit", jobID)
+	if err != nil || r.Job.Status != "queued" || ops.Load() != 1 {
+		t.Fatal(err, ops.Load())
+	}
+}
+func TestHandshakeTimeoutFailsBeforeAnyJobRequest(t *testing.T) {
+	var ops atomic.Int32
+	s := replyServer(t, func() { time.Sleep(3 * time.Second) }, func(string, http.ResponseWriter) bool { ops.Add(1); return false })
+	defer s.Close()
+	c := scaled(t, s)
+	start := time.Now()
+	_, err := c.Do(context.Background(), "submit", jobID)
+	if err == nil || ops.Load() != 0 {
+		t.Fatal("handshake timeout must fail and send no job request", err, ops.Load())
+	}
+	if d := time.Since(start); d < 1900*time.Millisecond || d > 2800*time.Millisecond {
+		t.Fatal("handshake limit not applied", d)
+	}
+}
+func TestJobRequestsKeepShortTimeout(t *testing.T) {
+	var ops atomic.Int32
+	s := replyServer(t, nil, func(string, http.ResponseWriter) bool { ops.Add(1); time.Sleep(900 * time.Millisecond); return false })
+	defer s.Close()
+	c := scaled(t, s)
+	start := time.Now()
+	if _, err := c.Do(context.Background(), "status", jobID); err == nil {
+		t.Fatal("slow job request must time out at the request limit")
+	}
+	// Each attempt is cut at ~300ms, not 2s: 3 existing same-ID attempts finish well under one handshake limit.
+	if d := time.Since(start); d > 1900*time.Millisecond || ops.Load() != 3 {
+		t.Fatal(d, ops.Load())
+	}
+}
+func TestLostSubmitResponseDoesNotCreateDuplicateJob(t *testing.T) {
+	var created, seen atomic.Int32
+	known := map[string]bool{}
+	var mu = make(chan struct{}, 1)
+	s := replyServer(t, nil, func(action string, w http.ResponseWriter) bool {
+		mu <- struct{}{}
+		if !known[jobID] {
+			known[jobID] = true
+			created.Add(1)
+		}
+		<-mu
+		if seen.Add(1) == 1 {
+			time.Sleep(900 * time.Millisecond) // response lost to the client's request timeout
+		}
+		return false
+	})
+	defer s.Close()
+	c := scaled(t, s)
+	r, err := c.Do(context.Background(), "submit", jobID)
+	if err != nil || r.Job.ID != jobID || created.Load() != 1 || seen.Load() != 2 {
+		t.Fatal(err, created.Load(), seen.Load())
+	}
+}
