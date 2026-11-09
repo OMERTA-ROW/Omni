@@ -45,6 +45,10 @@ func run(args []string) (int, error) {
 	if err != nil || sandboxGID == 0 {
 		return 0, fmt.Errorf("invalid omni-sandbox gid")
 	}
+	maxInt := uint64(^uint(0) >> 1)
+	if uint64(serviceUID) > maxInt || sandboxUID > maxInt || sandboxGID > maxInt {
+		return 0, fmt.Errorf("account id exceeds platform limits")
+	}
 	if len(args) == 2 && args[0] == "--cleanup" {
 		if err := removeWorkspace(args[1], serviceUID); err != nil {
 			return 0, err
