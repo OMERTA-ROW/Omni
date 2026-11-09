@@ -26,28 +26,20 @@ func main() {
 }
 
 func run(args []string) (int, error) {
-	serviceUID, err := accountUID("omni")
+	serviceUID, err := accountID("omni", false)
 	if err != nil {
 		return 0, err
 	}
-	if os.Geteuid() != 0 || uint32(os.Getuid()) != serviceUID {
+	if os.Geteuid() != 0 || os.Getuid() != serviceUID {
 		return 0, fmt.Errorf("shell helper privilege check failed")
 	}
-	sandbox, err := user.Lookup("omni-sandbox")
+	sandboxUID, err := accountID("omni-sandbox", false)
 	if err != nil {
-		return 0, fmt.Errorf("omni-sandbox account not found")
+		return 0, err
 	}
-	sandboxUID, err := strconv.ParseUint(sandbox.Uid, 10, 32)
-	if err != nil || sandboxUID == 0 {
-		return 0, fmt.Errorf("invalid omni-sandbox uid")
-	}
-	sandboxGID, err := strconv.ParseUint(sandbox.Gid, 10, 32)
-	if err != nil || sandboxGID == 0 {
-		return 0, fmt.Errorf("invalid omni-sandbox gid")
-	}
-	maxInt := uint64(^uint(0) >> 1)
-	if uint64(serviceUID) > maxInt || sandboxUID > maxInt || sandboxGID > maxInt {
-		return 0, fmt.Errorf("account id exceeds platform limits")
+	sandboxGID, err := accountID("omni-sandbox", true)
+	if err != nil {
+		return 0, err
 	}
 	if len(args) == 2 && args[0] == "--cleanup" {
 		if err := removeWorkspace(args[1], serviceUID); err != nil {
@@ -59,14 +51,14 @@ func run(args []string) (int, error) {
 		return 0, fmt.Errorf("invalid shell helper request")
 	}
 	requestedUID, err := strconv.ParseUint(args[2], 10, 32)
-	if err != nil || requestedUID != sandboxUID {
+	if err != nil || requestedUID != uint64(sandboxUID) {
 		return 0, fmt.Errorf("invalid shell uid")
 	}
 	requestedGID, err := strconv.ParseUint(args[3], 10, 32)
-	if err != nil || requestedGID != sandboxGID {
+	if err != nil || requestedGID != uint64(sandboxGID) {
 		return 0, fmt.Errorf("invalid shell gid")
 	}
-	if err := prepareWorkspace(args[1], serviceUID, uint32(sandboxUID), uint32(sandboxGID)); err != nil {
+	if err := prepareWorkspace(args[1], serviceUID, sandboxUID, sandboxGID); err != nil {
 		return 0, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,8 +77,8 @@ func run(args []string) (int, error) {
 		return 0, fmt.Errorf("could not contain shell descendants: %w", err)
 	}
 	cmd := exec.CommandContext(ctx, "/usr/bin/setpriv",
-		"--reuid="+strconv.FormatUint(sandboxUID, 10),
-		"--regid="+strconv.FormatUint(sandboxGID, 10),
+		"--reuid="+strconv.Itoa(sandboxUID),
+		"--regid="+strconv.Itoa(sandboxGID),
 		"--clear-groups",
 		"--no-new-privs",
 		"--",
@@ -120,19 +112,23 @@ func run(args []string) (int, error) {
 	return 0, nil
 }
 
-func accountUID(name string) (uint32, error) {
+func accountID(name string, group bool) (int, error) {
 	account, err := user.Lookup(name)
 	if err != nil {
 		return 0, fmt.Errorf("%s account not found", name)
 	}
-	id, err := strconv.ParseUint(account.Uid, 10, 32)
-	if err != nil || id == 0 {
+	value := account.Uid
+	if group {
+		value = account.Gid
+	}
+	id, err := strconv.Atoi(value)
+	if err != nil || id <= 0 || uint64(id) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("invalid %s id", name)
 	}
-	return uint32(id), nil
+	return id, nil
 }
 
-func workspace(path string, serviceUID uint32) error {
+func workspace(path string, serviceUID int) error {
 	if filepath.Clean(path) != path || filepath.Dir(path) != "/tmp" || !strings.HasPrefix(filepath.Base(path), "omni-shell-") {
 		return fmt.Errorf("invalid shell workspace")
 	}
@@ -144,13 +140,13 @@ func workspace(path string, serviceUID uint32) error {
 		return fmt.Errorf("shell workspace is not a directory")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != serviceUID {
+	if !ok || uint64(stat.Uid) != uint64(serviceUID) {
 		return fmt.Errorf("shell workspace owner mismatch")
 	}
 	return nil
 }
 
-func prepareWorkspace(path string, serviceUID, sandboxUID, sandboxGID uint32) error {
+func prepareWorkspace(path string, serviceUID, sandboxUID, sandboxGID int) error {
 	if err := workspace(path, serviceUID); err != nil {
 		return err
 	}
@@ -161,12 +157,12 @@ func prepareWorkspace(path string, serviceUID, sandboxUID, sandboxGID uint32) er
 		if current == path {
 			return nil
 		}
-		return os.Lchown(current, int(sandboxUID), int(sandboxGID))
+		return os.Lchown(current, sandboxUID, sandboxGID)
 	})
 	if err != nil {
 		return fmt.Errorf("could not prepare shell workspace: %w", err)
 	}
-	if err := os.Chown(path, int(serviceUID), int(sandboxGID)); err != nil {
+	if err := os.Chown(path, serviceUID, sandboxGID); err != nil {
 		return fmt.Errorf("could not set shell workspace group: %w", err)
 	}
 	if err := os.Chmod(path, 0o770); err != nil {
@@ -175,7 +171,7 @@ func prepareWorkspace(path string, serviceUID, sandboxUID, sandboxGID uint32) er
 	return nil
 }
 
-func removeWorkspace(path string, serviceUID uint32) error {
+func removeWorkspace(path string, serviceUID int) error {
 	if err := workspace(path, serviceUID); err != nil {
 		return err
 	}
