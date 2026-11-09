@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +72,52 @@ func TestHandshakeProvesSharedSecret(t *testing.T) {
 	}
 }
 
+func TestShellOptInControlsHandshakeAndSubmission(t *testing.T) {
+	s, h := newServer(t)
+	ch := strings.Repeat("a", 64)
+	w := do(h, "POST", "/jackboy/handshake", "Bearer "+key, "", `{"challenge":"`+ch+`"}`)
+	if strings.Contains(w.Body.String(), "shell-exec") {
+		t.Fatalf("disabled handshake advertises shell: %s", w.Body)
+	}
+	body := `{"contract":"omni.job/v1","jobId":"` + jobID + `","kind":"shell","command":"echo hello"}`
+	if w := do(h, "POST", "/jackboy/jobs", "Bearer "+key, jobID, body); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "shell jobs disabled") {
+		t.Fatalf("disabled shell job: %d %s", w.Code, w.Body)
+	}
+	s.ShellEnabled = true
+	w = do(h, "POST", "/jackboy/handshake", "Bearer "+key, "", `{"challenge":"`+ch+`"}`)
+	if !strings.Contains(w.Body.String(), "shell-exec") {
+		t.Fatalf("enabled handshake does not advertise shell: %s", w.Body)
+	}
+	if w := do(h, "POST", "/jackboy/jobs", "Bearer "+key, jobID, body); w.Code != http.StatusAccepted {
+		t.Fatalf("shell job without repo: %d %s", w.Code, w.Body)
+	}
+	j, err := s.Store.Get(jobID)
+	if err != nil || j.Command != "echo hello" || j.TimeoutSeconds != 60 || j.Repo != "" {
+		t.Fatalf("stored shell job: %+v, %v", j, err)
+	}
+}
+
+func TestShellJobRejectsBadTimeoutAndUnallowedRepo(t *testing.T) {
+	s, h := newServer(t)
+	s.ShellEnabled = true
+	base := `{"contract":"omni.job/v1","jobId":"` + jobID + `","kind":"shell","command":"echo hello","timeoutSeconds":3601}`
+	if w := do(h, "POST", "/jackboy/jobs", "Bearer "+key, jobID, base); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad timeout: %d %s", w.Code, w.Body)
+	}
+	zero := strings.Replace(base, `"timeoutSeconds":3601`, `"timeoutSeconds":0`, 1)
+	if w := do(h, "POST", "/jackboy/jobs", "Bearer "+key, jobID, zero); w.Code != http.StatusBadRequest {
+		t.Fatalf("zero timeout: %d %s", w.Code, w.Body)
+	}
+	badRepo := strings.Replace(base, `"timeoutSeconds":3601`, `"timeoutSeconds":1,"repo":"someone/else"`, 1)
+	if w := do(h, "POST", "/jackboy/jobs", "Bearer "+key, jobID, badRepo); w.Code != http.StatusForbidden {
+		t.Fatalf("unallowed repo: %d %s", w.Code, w.Body)
+	}
+	allowedRepo := strings.Replace(base, `"timeoutSeconds":3601`, `"timeoutSeconds":1,"repo":"OMERTA-ROW/Omni"`, 1)
+	if w := do(h, "POST", "/jackboy/jobs", "Bearer "+key, jobID, allowedRepo); w.Code != http.StatusAccepted {
+		t.Fatalf("allowlisted repo: %d %s", w.Code, w.Body)
+	}
+}
+
 func TestJobsAreIdempotentAndRepoAllowlisted(t *testing.T) {
 	s, h := newServer(t)
 	body := `{"contract":"omni.job/v1","jobId":"` + jobID + `","kind":"test","repo":"OMERTA-ROW/Omni","instructions":"run tests"}`
@@ -88,6 +136,68 @@ func TestJobsAreIdempotentAndRepoAllowlisted(t *testing.T) {
 	}
 	if j, _ := s.Store.Get(jobID); j.Status != "queued" {
 		t.Fatalf("status %s", j.Status)
+	}
+}
+
+func shellWorker(t *testing.T) *Worker {
+	t.Helper()
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Worker{Store: st, ShellUser: u.Username, ShellUID: uint32(uid), ShellGID: uint32(gid)}
+}
+
+func TestWorkerRunsShellWithScrubbedEnvironmentAndBoundedOutput(t *testing.T) {
+	t.Setenv("OMNI_API_KEY", "must-not-reach-shell")
+	w := shellWorker(t)
+	res := w.Process(context.Background(), &Job{
+		ID: jobID, Kind: "shell",
+		Command:        `printf '%s|%s|%s' "${OMNI_API_KEY-unset}" "$HOME" "$TMPDIR"; printf 'err' >&2`,
+		TimeoutSeconds: 5,
+	})
+	if res.Status != "completed" || res.Shell == nil || res.Shell.ExitCode != 0 || res.Shell.TimedOut {
+		t.Fatalf("shell result: %+v", res)
+	}
+	if !strings.HasPrefix(res.Shell.Stdout, "unset|") || !strings.Contains(res.Shell.Stdout, "|/") || res.Shell.Stderr != "err" {
+		t.Fatalf("unexpected shell output: %+v", res.Shell)
+	}
+	env := w.Process(context.Background(), &Job{ID: jobID, Kind: "shell", Command: "env", TimeoutSeconds: 5})
+	if env.Shell == nil || strings.Contains(env.Shell.Stdout, "OMNI_") || strings.Contains(env.Shell.Stdout, "API_KEY") || strings.Contains(env.Shell.Stdout, "CALLBACK_SECRET") {
+		t.Fatalf("shell environment was not scrubbed: %q", env.Shell.Stdout)
+	}
+	truncated := w.Process(context.Background(), &Job{ID: jobID, Kind: "shell", Command: "head -c 70000 /dev/zero | tr '\\000' x", TimeoutSeconds: 5})
+	if truncated.Shell == nil || !truncated.Shell.Truncated || len(truncated.Shell.Stdout) != maxShellOutput {
+		t.Fatalf("shell output was not bounded: %+v", truncated.Shell)
+	}
+}
+
+func TestWorkerTimesOutShellCommand(t *testing.T) {
+	res := shellWorker(t).Process(context.Background(), &Job{ID: jobID, Kind: "shell", Command: "sleep 5", TimeoutSeconds: 1})
+	if res.Status != "failed" || res.Shell == nil || !res.Shell.TimedOut || res.Shell.ExitCode != 124 {
+		t.Fatalf("expected timeout: %+v", res)
+	}
+}
+
+func TestWorkerClonesAllowlistedRepoForShell(t *testing.T) {
+	repo := gitRepo(t)
+	w := shellWorker(t)
+	w.CloneURL = func(string) string { return "file://" + repo }
+	res := w.Process(context.Background(), &Job{ID: jobID, Kind: "shell", Repo: "OMERTA-ROW/Omni", Command: "test -f x.go && printf cloned", TimeoutSeconds: 5})
+	if res.Status != "completed" || res.Shell == nil || res.Shell.Stdout != "cloned" {
+		t.Fatalf("shell checkout failed: %+v", res)
 	}
 }
 

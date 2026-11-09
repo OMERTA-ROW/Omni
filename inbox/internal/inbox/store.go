@@ -18,27 +18,40 @@ type Tests struct {
 
 // Result is the omni.job-result/v1 payload reported back to Jackboy.
 type Result struct {
-	Contract string  `json:"contract"`
-	JobID    string  `json:"jobId"`
-	Status   string  `json:"status"`
-	Summary  string  `json:"summary"`
-	PRURL    *string `json:"prUrl"`
-	Tests    *Tests  `json:"tests"`
-	DiffStat string  `json:"diffStat,omitempty"`
+	Contract string       `json:"contract"`
+	JobID    string       `json:"jobId"`
+	Status   string       `json:"status"`
+	Summary  string       `json:"summary"`
+	PRURL    *string      `json:"prUrl"`
+	Tests    *Tests       `json:"tests"`
+	Shell    *ShellResult `json:"shell,omitempty"`
+	DiffStat string       `json:"diffStat,omitempty"`
+}
+
+// ShellResult contains bounded output and execution details for a shell job.
+type ShellResult struct {
+	ExitCode   int    `json:"exitCode"`
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	DurationMs int64  `json:"durationMs"`
+	TimedOut   bool   `json:"timedOut"`
+	Truncated  bool   `json:"truncated"`
 }
 
 // Job is one durable unit of work.
 type Job struct {
-	ID           string    `json:"id"`
-	Kind         string    `json:"kind"`
-	Repo         string    `json:"repo"`
-	Instructions string    `json:"instructions"`
-	Patch        string    `json:"patch,omitempty"`
-	Status       string    `json:"status"` // queued, running, completed, failed
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
-	Result       *Result   `json:"result,omitempty"`
-	Reported     bool      `json:"reported"`
+	ID             string    `json:"id"`
+	Kind           string    `json:"kind"`
+	Repo           string    `json:"repo"`
+	Instructions   string    `json:"instructions"`
+	Patch          string    `json:"patch,omitempty"`
+	Command        string    `json:"command,omitempty"`
+	TimeoutSeconds int       `json:"timeoutSeconds,omitempty"`
+	Status         string    `json:"status"` // queued, running, completed, failed
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+	Result         *Result   `json:"result,omitempty"`
+	Reported       bool      `json:"reported"`
 }
 
 // Store keeps one JSON file per job; writes are atomic (temp file + rename) so restarts never lose jobs.
