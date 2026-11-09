@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -23,6 +24,7 @@ type Server struct {
 	APIKey       string // bearer Jackboy sends (OMNI_API_KEY)
 	Secret       string // shared HMAC secret (OMNI_CALLBACK_SECRET)
 	Version      string
+	ShellEnabled bool
 	AllowedRepos map[string]bool // only these owner/repo names are accepted
 	Store        *Store
 	Wake         chan struct{} // optional: nudges the worker
@@ -64,10 +66,14 @@ func (s *Server) handshake(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "challenge required", http.StatusBadRequest)
 		return
 	}
+	capabilities := []string{"jobs", "patch-apply", "go-test", "signed-callback"}
+	if s.ShellEnabled {
+		capabilities = append(capabilities, "shell-exec")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"contract":     handshakeContract,
 		"version":      s.Version,
-		"capabilities": []string{"jobs", "patch-apply", "go-test", "signed-callback"},
+		"capabilities": capabilities,
 		"proof":        HMACHex(s.Secret, in.Challenge),
 	})
 }
@@ -80,6 +86,8 @@ func (s *Server) jobs(w http.ResponseWriter, r *http.Request) {
 		Repo         string `json:"repo"`
 		Instructions string `json:"instructions"`
 		Patch        string `json:"patch"`
+		Command      string `json:"command"`
+		Timeout      *int   `json:"timeoutSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
@@ -92,14 +100,33 @@ func (s *Server) jobs(w http.ResponseWriter, r *http.Request) {
 	case !uuidRe.MatchString(in.JobID) || r.Header.Get("Idempotency-Key") != in.JobID:
 		http.Error(w, "jobId must be a UUID matching Idempotency-Key", http.StatusBadRequest)
 		return
-	case in.Kind != "code" && in.Kind != "test":
-		http.Error(w, "kind must be code or test", http.StatusBadRequest)
+	case in.Kind == "shell" && !s.ShellEnabled:
+		http.Error(w, "shell jobs disabled", http.StatusForbidden)
 		return
-	case !repoRe.MatchString(in.Repo) || !s.AllowedRepos[in.Repo]:
+	case in.Kind != "code" && in.Kind != "test" && in.Kind != "shell":
+		http.Error(w, "kind must be code, test, or shell", http.StatusBadRequest)
+		return
+	case in.Kind == "shell" && (strings.TrimSpace(in.Command) == "" || len(in.Command) > 16000):
+		http.Error(w, "shell command required (maximum 16000 bytes)", http.StatusBadRequest)
+		return
+	case in.Kind == "shell" && in.Timeout != nil && (*in.Timeout < 1 || *in.Timeout > 3600):
+		http.Error(w, "timeoutSeconds must be between 1 and 3600", http.StatusBadRequest)
+		return
+	case in.Kind != "shell" && (!repoRe.MatchString(in.Repo) || !s.AllowedRepos[in.Repo]):
+		http.Error(w, "repository not allowed", http.StatusForbidden)
+		return
+	case in.Kind == "shell" && in.Repo != "" && (!repoRe.MatchString(in.Repo) || !s.AllowedRepos[in.Repo]):
 		http.Error(w, "repository not allowed", http.StatusForbidden)
 		return
 	}
-	j, created, err := s.Store.Put(Job{ID: in.JobID, Kind: in.Kind, Repo: in.Repo, Instructions: trim(in.Instructions, 4000), Patch: in.Patch})
+	timeoutSeconds := 0
+	if in.Kind == "shell" {
+		timeoutSeconds = 60
+		if in.Timeout != nil {
+			timeoutSeconds = *in.Timeout
+		}
+	}
+	j, created, err := s.Store.Put(Job{ID: in.JobID, Kind: in.Kind, Repo: in.Repo, Instructions: trim(in.Instructions, 4000), Patch: in.Patch, Command: in.Command, TimeoutSeconds: timeoutSeconds})
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return

@@ -5,6 +5,7 @@ set -eu
 
 RUN_UID=10001
 RUN_GID=10001
+RUN_HOME=/home/omni
 
 fail() { echo "entrypoint: $*" >&2; exit 1; }
 
@@ -48,7 +49,11 @@ if [ -n "$dir" ]; then
 fi
 
 if [ "$(id -u)" = "0" ]; then
-  export HOME=/home/omni
+  export HOME="$RUN_HOME"
+  if [ "${OMNI_SHELL_ENABLED:-}" = "true" ] && [ "${1##*/}" = "omni-inbox" ]; then
+    # The inbox needs exec access to its caller-restricted setuid shell helper.
+    exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups -- "$@"
+  fi
   exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups --no-new-privs -- "$@"
 fi
 [ "$(id -u)" = "$RUN_UID" ] || fail "must run as root or uid $RUN_UID"

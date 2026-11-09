@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,13 +41,32 @@ func main() {
 		log.Fatal("OMNI_ALLOWED_REPOS is empty; refusing to accept jobs for any repository")
 	}
 	dataDir := env("OMNI_DATA_DIR", "omni-data")
+	shellEnabled := os.Getenv("OMNI_SHELL_ENABLED") == "true"
+	shellUser, shellUID, shellGID := "", uint32(0), uint32(0)
+	shellExecPath := ""
+	if shellEnabled {
+		u, err := user.Lookup("omni-sandbox")
+		if err != nil {
+			log.Fatal("OMNI_SHELL_ENABLED requires the omni-sandbox user")
+		}
+		uid, err := strconv.ParseUint(u.Uid, 10, 32)
+		if err != nil || uid == 0 {
+			log.Fatal("omni-sandbox must be a non-root user")
+		}
+		gid, err := strconv.ParseUint(u.Gid, 10, 32)
+		if err != nil || gid == 0 {
+			log.Fatal("omni-sandbox must have a non-root group")
+		}
+		shellUser, shellUID, shellGID = u.Username, uint32(uid), uint32(gid)
+		shellExecPath = "/usr/local/bin/omni-shell-exec"
+	}
 	store, err := inbox.NewStore(dataDir)
 	if err != nil {
 		log.Fatal(err)
 	}
 	wake := make(chan struct{}, 1)
-	srv := &inbox.Server{APIKey: key, Secret: secret, Version: version, AllowedRepos: allowed, Store: store, Wake: wake}
-	wk := &inbox.Worker{Store: store, Secret: secret, CallbackURL: env("JACKBOY_CALLBACK_URL", "https://jackboy-dev-control.lovable.app/api/public/omni/callback"), GitToken: os.Getenv("OMNI_GIT_TOKEN"), Wake: wake}
+	srv := &inbox.Server{APIKey: key, Secret: secret, Version: version, ShellEnabled: shellEnabled, AllowedRepos: allowed, Store: store, Wake: wake}
+	wk := &inbox.Worker{Store: store, Secret: secret, CallbackURL: env("JACKBOY_CALLBACK_URL", "https://jackboy-dev-control.lovable.app/api/public/omni/callback"), GitToken: os.Getenv("OMNI_GIT_TOKEN"), ShellUser: shellUser, ShellUID: shellUID, ShellGID: shellGID, ShellExecPath: shellExecPath, Wake: wake}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
