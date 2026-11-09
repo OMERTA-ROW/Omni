@@ -26,6 +26,12 @@ import (
 const Path = "/api/public/omni/link"
 const Contract = "omni.link/v2"
 
+// HandshakeTimeout bounds the session-creating handshake only. It is read-only on the
+// Jackboy side (creates a short-lived session) and was observed taking 3-5s+. All other
+// operations (submit, run, status, cancel) keep the stricter RequestTimeout.
+const HandshakeTimeout = 10 * time.Second
+const RequestTimeout = 5 * time.Second
+
 var uuid = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var clientID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 var ErrSession = errors.New("session rejected; reconnect required")
@@ -61,6 +67,19 @@ type Client struct {
 	mu                                              sync.Mutex
 	session                                         string
 	expires                                         time.Time
+	// Test hooks: zero means HandshakeTimeout / RequestTimeout. Values above those caps are ignored.
+	handshakeLimit, requestLimit time.Duration
+}
+
+func (c *Client) limit(action string) time.Duration {
+	max, set := RequestTimeout, c.requestLimit
+	if action == "handshake" {
+		max, set = HandshakeTimeout, c.handshakeLimit
+	}
+	if set > 0 && set < max {
+		return set
+	}
+	return max
 }
 
 func New(base, id, project, bootstrap, secret string, audit func(Event) error) (*Client, error) {
@@ -117,8 +136,8 @@ func (c *Client) send(ctx context.Context, action, job, token string) (*Reply, e
 	}
 	// Credential-bearing requests may never follow redirects, including same-origin redirects.
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	if client.Timeout == 0 || client.Timeout > 5*time.Second {
-		client.Timeout = 5 * time.Second
+	if limit := c.limit(action); client.Timeout == 0 || client.Timeout > limit {
+		client.Timeout = limit
 	}
 	resp, err := client.Do(req)
 	if err != nil {
