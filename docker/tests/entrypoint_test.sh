@@ -63,4 +63,43 @@ sh "$EP" >/dev/null 2>&1; rc=$?
 mk; unset OMNI_LINK_AUDIT_DIR; out="$(sh "$EP" sh -c 'echo $(id -u)' 2>&1)"
 [ "$out" = 10001 ] && ok "audit dir unset: app still starts as 10001" || bad "unset ($out)"
 
+# A synthetic command exercises inbox-only storage setup without starting a service.
+mk
+BIN="$T/omni-inbox"
+printf '#!/bin/sh\nprintf "%%s:%%s" "$(id -u)" "$(stat -c "%%u:%%g %%a" "$OMNI_DATA_DIR")"\ntouch "$OMNI_DATA_DIR/probe"\n' > "$BIN"
+chmod 755 "$BIN"
+DATA="$T/jobs"
+out="$(OMNI_DATA_DIR="$DATA" sh "$EP" "$BIN" 2>&1)"; rc=$?
+[ $rc = 0 ] && [ "$out" = "10001:10001:10001 700" ] && [ "$(stat -c '%u' "$DATA/probe")" = 10001 ] \
+  && ok "inbox: creates private service-owned writable data directory" || bad "inbox data ($rc: $out)"
+
+chmod 777 "$DATA"
+out="$(OMNI_DATA_DIR="$DATA" sh "$EP" "$BIN" 2>&1)"; rc=$?
+[ $rc = 0 ] && [ "$(st "$DATA")" = "10001:10001 700" ] \
+  && ok "inbox: tightens existing data directory" || bad "inbox data permissions ($rc: $out)"
+
+ln -s "$DATA" "$T/data-link"
+OMNI_DATA_DIR="$T/data-link" sh "$EP" "$BIN" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && ok "inbox: rejects symlinked data directory" || bad "inbox data symlink"
+
+OMNI_DATA_DIR="$T/data-link/jobs" sh "$EP" "$BIN" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && ok "inbox: rejects symlinked data parent" || bad "inbox data parent"
+
+for path in relative / "$T/missing/jobs" "$T/a/../jobs"; do
+  OMNI_DATA_DIR="$path" sh "$EP" "$BIN" >/dev/null 2>&1; rc=$?
+  [ $rc != 0 ] && ok "inbox: rejects unsafe path $path" || bad "inbox unsafe path $path"
+done
+
+if [ ! -e /data ]; then
+  unset OMNI_DATA_DIR
+  sh "$EP" "$BIN" >/dev/null 2>&1; rc=$?
+  [ $rc != 0 ] && [ ! -e /data ] && ok "inbox: missing /data fails without ephemeral fallback" || bad "inbox missing mount"
+else
+  [ -d /data ] || bad "/data fixture must be a directory"
+fi
+
+chmod 755 "$DATA"
+setpriv --reuid=10001 --regid=10001 --clear-groups -- env OMNI_DATA_DIR="$DATA" sh "$EP" "$BIN" >/dev/null 2>&1; rc=$?
+[ $rc != 0 ] && ok "inbox: nonroot rejects incorrect data permissions" || bad "inbox nonroot data"
+
 echo "passed=$pass failed=$failn"; [ "$failn" = 0 ]
