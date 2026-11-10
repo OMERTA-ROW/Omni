@@ -500,3 +500,279 @@ func TestV3TerminalCallbackBoundsRedactionAndProof(t *testing.T) {
 		t.Fatal("callback preparation mutated retained result")
 	}
 }
+
+func v3OutboxFixture(t *testing.T, v *DispatchV3) v3State {
+	t.Helper()
+	state := v3Snapshot(t, v)
+	for i := 1; i <= 2; i++ {
+		scope := dispatchTestScope()
+		scope.JobID = fmt.Sprintf("11111111-1111-4111-8111-%012d", i)
+		payload := "private signed instructions"
+		scope.PayloadDigest = payloadDigest(scope, payload)
+		job := v3Job{Scope: scope, Payload: payload, ExpiresAt: time.Now().Add(time.Minute).Unix(), Status: "quarantined"}
+		state.Jobs[scope.JobID] = job
+		state.Outbox = append(state.Outbox, newV3Event(job))
+		if i == 1 {
+			job.Status = "cancelled"
+			state.Jobs[scope.JobID] = job
+			state.Outbox = append(state.Outbox, newV3Event(job))
+		}
+	}
+	if err := v.write(state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func v3CallbackFixture(t *testing.T, v *DispatchV3, accept func(string, string) bool) {
+	t.Helper()
+	tls := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			JobID  string `json:"jobId"`
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		if !accept(body.JobID, body.Status) {
+			w.WriteHeader(422)
+			return
+		}
+		nonce := r.Header.Get("X-Omni-Nonce")
+		ack, _ := json.Marshal(map[string]string{"contract": callbackV3Contract, "requestNonce": nonce, "status": body.Status})
+		w.Header().Set("X-Omni-Proof", jackboyTestHMAC(callbackTestSecret, callbackV3Contract+"\nresponse\n"+nonce+"\n200\n"+string(ack)))
+		_, _ = w.Write(ack)
+	}))
+	t.Cleanup(tls.Close)
+	v.storage.config.CallbackURL = tls.URL + callbackPath
+	v.storage.http.Transport = tls.Client().Transport
+}
+
+func TestV3CallbackRetriesDoNotBlockOtherJobs(t *testing.T) {
+	_, v := v3Fixture(t, false)
+	state := v3OutboxFixture(t, v)
+	first, other := state.Outbox[0].Job.Scope.JobID, state.Outbox[2].Job.Scope.JobID
+	calls := make(chan string, 10)
+	v3CallbackFixture(t, v, func(id, status string) bool {
+		calls <- id + ":" + status
+		return id != first
+	})
+	if err := v.deliver(context.Background()); err == nil {
+		t.Fatal("permanent rejection was not reported")
+	}
+	if got := <-calls; got != first+":quarantined" {
+		t.Fatalf("first callback: %s", got)
+	}
+	if got := <-calls; got != other+":quarantined" {
+		t.Fatalf("unrelated due callback blocked: %s", got)
+	}
+	state = v3Snapshot(t, v)
+	if len(state.Outbox) != 2 || state.Outbox[0].Attempt != 1 || state.Outbox[1].Attempt != 0 {
+		t.Fatalf("per-job order lost: %+v", state.Outbox)
+	}
+	if err := v.deliver(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 {
+		t.Fatal("later event bypassed same-job backoff")
+	}
+	// A persisted backoff remains isolated after reopening the store.
+	s := v.storage
+	reopened, err := NewDispatchServer(filepath.Dir(s.dir), s.config, s.allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.EnableV3(v.worker); err != nil {
+		t.Fatal(err)
+	}
+	if state := v3Snapshot(t, reopened.v3); len(state.Outbox) != 2 {
+		t.Fatal("pending callbacks lost on reopen")
+	}
+}
+
+func TestV3CallbackDeadLetterLimits(t *testing.T) {
+	for _, limit := range []string{"attempts", "age", "existing_cap"} {
+		t.Run(limit, func(t *testing.T) {
+			_, v := v3Fixture(t, false)
+			state := v3OutboxFixture(t, v)
+			first := state.Outbox[0].Job.Scope.JobID
+			switch limit {
+			case "attempts":
+				state.Outbox[0].Attempt = 7
+			case "age":
+				state.Outbox[0].CreatedAt = time.Now().Add(-24 * time.Hour).Unix()
+				state.Outbox[0].NextAt = time.Now().Add(time.Hour).Unix()
+			case "existing_cap":
+				state.Outbox[0].Attempt = 8
+			}
+			if err := v.write(state); err != nil {
+				t.Fatal(err)
+			}
+			var attempts atomic.Int32
+			v3CallbackFixture(t, v, func(id, status string) bool {
+				if id == first && status == "quarantined" {
+					attempts.Add(1)
+					return false
+				}
+				return true
+			})
+			err := v.deliver(context.Background())
+			if (limit == "attempts") != (err != nil) {
+				t.Fatalf("unexpected delivery error: %v", err)
+			}
+			state = v3Snapshot(t, v)
+			if len(state.Outbox) != 0 || len(state.DeadLetters) != 1 {
+				t.Fatalf("dead letter blocked later callbacks: %+v", state)
+			}
+			dead := state.DeadLetters[0]
+			wantReason, wantAttempt, wantCalls := "max_attempts", 8, int32(0)
+			if limit == "age" {
+				wantReason, wantAttempt = "max_age", 0
+			}
+			if limit == "attempts" {
+				wantCalls = 1
+			}
+			if dead.JobID != first || dead.Reason != wantReason || dead.Attempt != wantAttempt || attempts.Load() != wantCalls {
+				t.Fatalf("bad dead letter: %+v calls=%d", dead, attempts.Load())
+			}
+			raw, _ := json.Marshal(dead)
+			if bytes.Contains(raw, []byte("payload")) || bytes.Contains(raw, []byte("private signed instructions")) {
+				t.Fatal("dead letter contains payload")
+			}
+			audit, err := os.ReadFile(filepath.Join(v.storage.dir, "audit.jsonl"))
+			if err != nil || !bytes.Contains(audit, []byte("v3_callback_dead_letter_"+wantReason)) ||
+				bytes.Contains(audit, []byte("private signed instructions")) {
+				t.Fatalf("missing or unsafe dead-letter audit: %s %v", audit, err)
+			}
+			if state.Jobs[first].Payload != "private signed instructions" {
+				t.Fatal("dead lettering removed original job")
+			}
+			if err := v.deliver(context.Background()); err != nil || attempts.Load() != wantCalls {
+				t.Fatal("dead letter was retried")
+			}
+			state.DeadLetters[0].Reason = "invalid"
+			if err := v.write(state); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := v.read(); err == nil {
+				t.Fatal("corrupt dead letter accepted with empty outbox")
+			}
+		})
+	}
+}
+
+func TestV3OldOutboxGetsDurableAge(t *testing.T) {
+	_, v := v3Fixture(t, false)
+	state := v3OutboxFixture(t, v)
+	for i := range state.Outbox {
+		state.Outbox[i].CreatedAt = 0
+		state.Outbox[i].NextAt = time.Now().Add(time.Hour).Unix()
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &old); err != nil {
+		t.Fatal(err)
+	}
+	delete(old, "deadLetters")
+	var events []map[string]any
+	if err := json.Unmarshal(old["outbox"], &events); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		delete(event, "createdAt")
+	}
+	old["outbox"], _ = json.Marshal(events)
+	raw, _ = json.Marshal(old)
+	if err := os.WriteFile(filepath.Join(v.storage.dir, "state.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().Unix()
+	if err := v.deliver(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state = v3Snapshot(t, v)
+	for _, event := range state.Outbox {
+		if event.CreatedAt < before || event.CreatedAt > time.Now().Unix() {
+			t.Fatalf("missing conservative migration timestamp: %+v", event)
+		}
+	}
+	if len(state.DeadLetters) != 0 {
+		t.Fatal("legacy event discarded during migration")
+	}
+	raw, err = os.ReadFile(filepath.Join(v.storage.dir, "state.json"))
+	if err != nil || !bytes.Contains(raw, []byte(`"createdAt":`)) {
+		t.Fatal("migration age not persisted")
+	}
+}
+
+func TestV3PermanentCallbackStopsAfterEightAttempts(t *testing.T) {
+	_, v := v3Fixture(t, false)
+	state := v3OutboxFixture(t, v)
+	first := state.Outbox[0].Job.Scope.JobID
+	var attempts atomic.Int32
+	v3CallbackFixture(t, v, func(id, status string) bool {
+		if id == first && status == "quarantined" {
+			attempts.Add(1)
+			return false
+		}
+		return true
+	})
+	for n := 1; n <= 8; n++ {
+		state = v3Snapshot(t, v)
+		state.Outbox[0].NextAt = 0
+		if err := v.write(state); err != nil {
+			t.Fatal(err)
+		}
+		if err := v.deliver(context.Background()); err == nil || attempts.Load() != int32(n) {
+			t.Fatalf("attempt %d: calls=%d err=%v", n, attempts.Load(), err)
+		}
+	}
+	state = v3Snapshot(t, v)
+	if len(state.Outbox) != 0 || len(state.DeadLetters) != 1 || state.DeadLetters[0].Attempt != 8 {
+		t.Fatal("permanent failure was not capped at eight attempts")
+	}
+	if err := v.deliver(context.Background()); err != nil || attempts.Load() != 8 {
+		t.Fatal("ninth attempt made for a dead letter")
+	}
+}
+
+func TestV3EscapedSixKiBPayloadAndSeparateBodyLimits(t *testing.T) {
+	// A patch-shaped 6 KiB payload whose quotes/newlines expand on the wire.
+	prefix := "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n"
+	payload := prefix + strings.Repeat("+\"\n", (6144-len(prefix))/3)
+	payload += strings.Repeat("\n", 6144-len(payload))
+	s, _ := v3Fixture(t, false)
+	body := v3Body("submit", payload, time.Now().Add(time.Minute).Unix(), "build")
+	if len(payload) != 6144 || len(body) <= dispatchMaxBody {
+		t.Fatal("fixture does not exercise expanded JSON payload")
+	}
+	if w := serveDispatch(s, v3Request(body, strings.Repeat("a", 32))); w.Code != 202 {
+		t.Fatalf("escaped patch rejected: %d %s", w.Code, w.Body)
+	}
+	for _, size := range []int{dispatchV3MaxBody, dispatchV3MaxBody + 1} {
+		padded := append(bytes.Clone(body), bytes.Repeat([]byte(" "), size-len(body))...)
+		want := 202
+		if size > dispatchV3MaxBody {
+			want = 400
+		}
+		if w := serveDispatch(s, v3Request(padded, fmt.Sprintf("%032x", size))); w.Code != want {
+			t.Fatalf("v3 body size %d: %d %s", size, w.Code, w.Body)
+		}
+	}
+	v2 := dispatchTestBody("submit", dispatchTestScope())
+	for _, size := range []int{dispatchMaxBody, dispatchMaxBody + 1} {
+		padded := append(bytes.Clone(v2), bytes.Repeat([]byte(" "), size-len(v2))...)
+		want := 202
+		if size > dispatchMaxBody {
+			want = 400
+		}
+		if w := serveDispatch(s, dispatchTestRequest(padded, fmt.Sprintf("%032x", size))); w.Code != want {
+			t.Fatalf("v2 body size %d: %d %s", size, w.Code, w.Body)
+		}
+	}
+}

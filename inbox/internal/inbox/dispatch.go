@@ -127,8 +127,8 @@ func NewDispatchServer(dataDir string, config DispatchConfig, allowed map[string
 
 func (s *DispatchServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.v3 != nil && s.config.Enabled {
-		buffered := bufio.NewReaderSize(r.Body, dispatchMaxBody+1)
-		raw, err := buffered.Peek(dispatchMaxBody + 1)
+		buffered := bufio.NewReaderSize(r.Body, dispatchV3MaxBody+1)
+		raw, err := buffered.Peek(dispatchV3MaxBody + 1)
 		r.Body = struct {
 			io.Reader
 			io.Closer

@@ -216,8 +216,9 @@ storage growth; do not delete replay history as a routine log-rotation step.
 The same `POST /api/public/jackboy/dispatch` also accepts
 `contract: "jackboy.dispatch/v3"`. V2 remains its unchanged quarantine-only
 protocol. V3 uses the same keys, client, 60-second timestamp window, five-minute
-persisted nonce retention, exact-byte HMAC/proof formats and 8192-byte request
-limit, replacing only the contract prefix in those canonical strings.
+persisted nonce retention and exact-byte HMAC/proof formats, replacing only the
+contract prefix in those canonical strings. V3 accepts up to 40960 bytes of
+inbound JSON so escaped payloads fit; v2 retains its 8192-byte request limit.
 All requests remain disabled unless `OMNI_DISPATCH_ENABLED=true`.
 
 A v3 submit has the v2 scope fields plus **exactly**:
@@ -305,13 +306,23 @@ encoded or fragmented secrets; tests must still run without credentials.
 Output can be shortened further when JSON escaping would exceed the 8192-byte
 callback envelope; `truncated` is then true. Raw output is never audit-logged.
 
-Transitions enqueue ordered persistent callback snapshots. Failed delivery or
-bad proof retains the event and result; retries use fresh timestamp/nonce/signature
-with exponential backoff from two seconds up to 256 seconds. Successful verified
-ack removes only that outbox event, not the stored job/result. There is no retry
-limit or automatic result deletion. Delivery is ordered, so a failed earlier
-callback can delay later callbacks; monitor the outbox and disk use. The delivery
-loop works with execution off, but dispatch itself must remain enabled.
+Transitions enqueue persistent callback snapshots in per-job order. Every pass
+delivers due events across jobs; one job's rejection/backoff never blocks other
+jobs. Later events for the same job wait for the earlier event's acknowledgement
+or dead-lettering. Retries use fresh timestamp/nonce/signature with exponential
+backoff from two seconds, capped at eight total attempts or 24 hours from enqueue,
+whichever comes first. At either limit the event moves to the state's `deadLetters`
+list and an audit entry records the transition. Dead letters contain only job ID,
+status, attempt count, creation/dead-letter timestamps and reason, never payloads
+or results. Delivery then continues, including the next event for that job.
+Older outbox entries without creation timestamps get a conservative first-observed
+timestamp persisted once, so restarts cannot reset their age.
+
+Successful verified ack removes only that outbox event, not the stored job/result.
+Dead-lettering also preserves the original job/result; dead letters are not retried
+automatically. There is no automatic result/dead-letter deletion; monitor both
+lists and disk use. The delivery loop works with execution off, but dispatch
+itself must remain enabled. Callback envelopes remain capped at 8192 bytes.
 
 The v3 runner and callbacks do not confer owner authorization: Jackboy must
 validate its current grant before signing; revocation must send signed cancel.

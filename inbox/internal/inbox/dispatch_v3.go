@@ -27,6 +27,7 @@ import (
 const (
 	dispatchV3Contract = "jackboy.dispatch/v3"
 	callbackV3Contract = "jackboy.dispatch-callback/v3"
+	dispatchV3MaxBody  = 40960
 )
 
 type v3Result struct {
@@ -45,15 +46,26 @@ type v3Job struct {
 }
 
 type v3Event struct {
-	Job     v3Job `json:"job"`
-	Attempt int   `json:"attempt"`
-	NextAt  int64 `json:"nextAt"`
+	Job       v3Job `json:"job"`
+	Attempt   int   `json:"attempt"`
+	NextAt    int64 `json:"nextAt"`
+	CreatedAt int64 `json:"createdAt"`
+}
+
+type v3DeadLetter struct {
+	JobID     string `json:"jobId"`
+	Status    string `json:"status"`
+	Attempt   int    `json:"attempt"`
+	CreatedAt int64  `json:"createdAt"`
+	DeadAt    int64  `json:"deadAt"`
+	Reason    string `json:"reason"`
 }
 
 type v3State struct {
-	Nonces map[string]dispatchNonceTime `json:"nonces"`
-	Jobs   map[string]v3Job             `json:"jobs"`
-	Outbox []v3Event                    `json:"outbox"`
+	Nonces      map[string]dispatchNonceTime `json:"nonces"`
+	Jobs        map[string]v3Job             `json:"jobs"`
+	Outbox      []v3Event                    `json:"outbox"`
+	DeadLetters []v3DeadLetter               `json:"deadLetters"`
 }
 
 // DispatchV3 never places jobs in the legacy queue. Its runner only claims
@@ -162,8 +174,8 @@ func (v *DispatchV3) handle(r *http.Request) (int, []byte, string) {
 		err != nil || time.Since(time.Unix(seconds, 0)).Abs() > time.Minute {
 		return dispatchError(401, "authentication_failed")
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, dispatchMaxBody+1))
-	if err != nil || len(raw) > dispatchMaxBody {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, dispatchV3MaxBody+1))
+	if err != nil || len(raw) > dispatchV3MaxBody {
 		return dispatchError(400, "invalid_body")
 	}
 	signature := r.Header.Get("X-Jackboy-Signature")
@@ -336,14 +348,14 @@ func (v *DispatchV3) authenticated(raw []byte, nonce string, timestamp int64) (i
 
 func newV3Event(job v3Job) v3Event {
 	job.Payload = ""
-	return v3Event{Job: job}
+	return v3Event{Job: job, CreatedAt: time.Now().Unix()}
 }
 
 func (v *DispatchV3) read() (v3State, error) {
 	var state v3State
 	f, err := v.storage.privateFile("state.json", os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
-		return v3State{Nonces: map[string]dispatchNonceTime{}, Jobs: map[string]v3Job{}, Outbox: []v3Event{}}, nil
+		return v3State{Nonces: map[string]dispatchNonceTime{}, Jobs: map[string]v3Job{}, Outbox: []v3Event{}, DeadLetters: []v3DeadLetter{}}, nil
 	}
 	if err != nil {
 		return state, err
@@ -356,6 +368,10 @@ func (v *DispatchV3) read() (v3State, error) {
 	}
 	if state.Nonces == nil || state.Jobs == nil || state.Outbox == nil {
 		return state, fmt.Errorf("incomplete v3 state")
+	}
+	// Older v3 state has no dead-letter list or event creation timestamps.
+	if state.DeadLetters == nil {
+		state.DeadLetters = []v3DeadLetter{}
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return state, fmt.Errorf("trailing v3 state")
@@ -381,12 +397,20 @@ func (v *DispatchV3) read() (v3State, error) {
 	for _, event := range state.Outbox {
 		job, exists := state.Jobs[event.Job.Scope.JobID]
 		if !exists || event.Job.Scope != job.Scope || event.Job.Payload != "" || event.Job.ExpiresAt != job.ExpiresAt ||
-			event.Attempt < 0 || event.NextAt < 0 ||
+			event.Attempt < 0 || event.Attempt > 8 || event.NextAt < 0 || event.CreatedAt < 0 ||
 			!strings.Contains("|quarantined|cancelled|running|completed|failed|expired|", "|"+event.Job.Status+"|") {
 			return state, fmt.Errorf("invalid v3 callback")
 		}
 		if err := validateV3Result(event.Job); err != nil {
 			return state, err
+		}
+	}
+	for _, event := range state.DeadLetters {
+		if _, exists := state.Jobs[event.JobID]; !exists || event.Attempt < 0 || event.Attempt > 8 ||
+			event.CreatedAt <= 0 || event.DeadAt < event.CreatedAt ||
+			(event.Reason != "max_attempts" && event.Reason != "max_age") ||
+			!strings.Contains("|quarantined|cancelled|running|completed|failed|expired|", "|"+event.Status+"|") {
+			return state, fmt.Errorf("invalid v3 dead letter")
 		}
 	}
 	return state, nil
@@ -698,31 +722,88 @@ func (v *DispatchV3) deliver(ctx context.Context) error {
 	if err != nil || len(state.Outbox) == 0 {
 		return err
 	}
-	event := state.Outbox[0]
-	if event.NextAt > time.Now().Unix() {
-		return nil
+	migrated := false
+	for i := range state.Outbox {
+		if state.Outbox[i].CreatedAt == 0 {
+			state.Outbox[i].CreatedAt = time.Now().Unix()
+			migrated = true
+		}
 	}
-	if err := v.storage.audit("v3_callback_attempt", event.Job.Scope.JobID, event.Job.Status, 0); err != nil {
-		return err
+	if migrated {
+		// Persist a conservative first-observed age once, never reset it on restart.
+		if err := v.write(state); err != nil {
+			return err
+		}
 	}
-	sendErr := v.send(ctx, event.Job)
-	code := 200
-	if sendErr != nil {
-		code = 502
-		event.Attempt = min(event.Attempt+1, 8)
-		backoff := time.Second << min(event.Attempt, 8)
-		event.NextAt = time.Now().Add(backoff).Unix()
-		state.Outbox[0] = event
-	} else {
-		state.Outbox = state.Outbox[1:]
+	blocked := map[string]bool{}
+	var deliveryErr error
+	for i := 0; i < len(state.Outbox); {
+		if ctx.Err() != nil {
+			return errors.Join(deliveryErr, ctx.Err())
+		}
+		event := state.Outbox[i]
+		id := event.Job.Scope.JobID
+		if blocked[id] {
+			i++
+			continue
+		}
+		reason := v3DeadLetterReason(event)
+		if reason == "" && event.NextAt > time.Now().Unix() {
+			blocked[id] = true
+			i++
+			continue
+		}
+		if reason == "" {
+			if err := v.storage.audit("v3_callback_attempt", id, event.Job.Status, 0); err != nil {
+				return err
+			}
+			sendErr := v.send(ctx, event.Job)
+			event.Attempt++
+			code := 200
+			if sendErr != nil {
+				code = 502
+				event.NextAt = time.Now().Add(time.Second << event.Attempt).Unix()
+				reason = v3DeadLetterReason(event)
+				deliveryErr = errors.Join(deliveryErr, sendErr)
+			}
+			if err := v.storage.audit("v3_callback_result", id, event.Job.Status, code); err != nil {
+				return err
+			}
+			if sendErr != nil && reason == "" {
+				state.Outbox[i] = event
+				blocked[id] = true
+				if err := v.write(state); err != nil {
+					return err
+				}
+				i++
+				continue
+			}
+		}
+		if reason != "" {
+			if err := v.storage.audit("v3_callback_dead_letter_"+reason, id, event.Job.Status, 502); err != nil {
+				return err
+			}
+			state.DeadLetters = append(state.DeadLetters, v3DeadLetter{
+				JobID: id, Status: event.Job.Status, Attempt: event.Attempt,
+				CreatedAt: event.CreatedAt, DeadAt: time.Now().Unix(), Reason: reason,
+			})
+		}
+		state.Outbox = append(state.Outbox[:i], state.Outbox[i+1:]...)
+		if err := v.write(state); err != nil {
+			return err
+		}
 	}
-	if err := v.storage.audit("v3_callback_result", event.Job.Scope.JobID, event.Job.Status, code); err != nil {
-		return err
+	return deliveryErr
+}
+
+func v3DeadLetterReason(event v3Event) string {
+	if event.Attempt >= 8 {
+		return "max_attempts"
 	}
-	if err := v.write(state); err != nil {
-		return err
+	if time.Now().Unix()-event.CreatedAt >= int64((24*time.Hour)/time.Second) {
+		return "max_age"
 	}
-	return sendErr
+	return ""
 }
 
 func (v *DispatchV3) send(ctx context.Context, job v3Job) error {
