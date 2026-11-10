@@ -28,6 +28,7 @@ type Server struct {
 	AllowedRepos map[string]bool // only these owner/repo names are accepted
 	Store        *Store
 	Wake         chan struct{} // optional: nudges the worker
+	Dispatch     http.Handler  // independent, receipt-only scoped dispatch lane
 }
 
 // Handler returns the HTTP routes.
@@ -37,6 +38,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /jackboy/handshake", s.auth(s.handshake))
 	m.HandleFunc("POST /jackboy/jobs", s.auth(s.jobs))
 	m.HandleFunc("GET /jackboy/jobs/{id}", s.auth(s.status))
+	if s.Dispatch != nil {
+		m.Handle("POST "+dispatchPath, s.Dispatch)
+	} else {
+		m.HandleFunc("POST "+dispatchPath, func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "dispatch disabled", http.StatusServiceUnavailable)
+		})
+	}
 	return m
 }
 

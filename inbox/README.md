@@ -85,3 +85,121 @@ tests the real helper as service UID 10001, with tests executing as UID 10002.
 ## OMNI-initiated secure link (separate opt-in)
 
 See [SECURE-LINK.md](SECURE-LINK.md) for the scoped, time-limited Jackboy handshake and fixed protocol-test job client. This does not activate the legacy worker above. A throwaway checkout alone is not a security sandbox for untrusted repository code.
+
+## Jackboy scoped dispatch v2 (receipt-only, off by default)
+
+`POST /api/public/jackboy/dispatch` implements `jackboy.dispatch/v2`, matching
+Jackboy's `src/lib/omni-dispatch-client.server.ts` and
+`src/lib/omni-dispatch-callback.server.ts` at
+`f86d0932c3ca46d319958f8bffe85df763efedec`. This is a separate signed lane:
+the legacy `/jackboy/*` routes, bearer authentication, handshake and sandbox
+are unchanged. Do **not** enable `OMNI_WORKER_ENABLED` for this protocol.
+
+| Environment variable | Purpose |
+|---|---|
+| `OMNI_DISPATCH_ENABLED` | Only the exact value `true` enables dispatch; otherwise requests receive 503. Default off. |
+| `OMNI_DISPATCH_CLIENT_ID` | Expected `x-jackboy-client`; 1–64 ASCII letters, digits, `_` or `-`. |
+| `OMNI_DISPATCH_HMAC_SECRET` | Request signing/response proof key, at least 32 characters; match Jackboy's dispatch client configuration. |
+| `JACKBOY_DISPATCH_CALLBACK_URL` | Explicit HTTPS URL ending exactly in `/api/public/omni/callback`; no credentials, query, fragment or redirects. |
+| `OMNI_DISPATCH_CALLBACK_CLIENT_ID` | Outgoing `x-omni-client`; match Jackboy's callback receiver setting of the same name. |
+| `OMNI_DISPATCH_CALLBACK_SECRET` | Separate callback signing/proof key, at least 32 characters; match Jackboy's receiver. |
+| `OMNI_DATA_DIR` | Existing private persistent storage root (default `/data`); dispatch uses its own `dispatch-v2/` directory. |
+| `OMNI_ALLOWED_REPOS` | Existing exact repository allowlist, also required for submit, status and cancel. |
+
+All dispatch/callback settings must be valid when dispatch is enabled; invalid
+enabled configuration aborts startup. The receiver on Jackboy independently
+requires its own `OMNI_DISPATCH_CALLBACK_ENABLED=true` and current live grants.
+Nothing in this implementation changes that setting or grants approval.
+
+### Wire authentication and scope
+
+The request body is at most 8192 bytes and contains exactly `contract`, `action`
+(`submit`, `status`, `cancel`), UUID `ownerId`, `projectId`, `grantId`, `jobId`,
+allowlisted `repo`, `kind` (`build`, `test`) and lowercase 64-hex `payloadDigest`.
+Unknown/duplicate/case-folded fields, non-string values, invalid UTF-8 and
+trailing JSON are rejected. The body contains no instructions, patch or command.
+
+Headers are `x-jackboy-client`, 10-digit `x-jackboy-timestamp` (within 60 seconds),
+32-lowercase-hex `x-jackboy-nonce`, and lowercase-hex `x-jackboy-signature`.
+The signature is HMAC-SHA256 of these newline-separated bytes, with no trailing
+newline:
+
+```
+jackboy.dispatch/v2
+POST
+/api/public/jackboy/dispatch
+{client}
+{timestamp}
+{nonce}
+{raw body}
+```
+
+Jackboy must validate the current owner/project/grant before sending. OMNI
+authenticates Jackboy and binds every operation to the entire immutable scope;
+it does not independently query Jackboy's grant database or grant execution.
+Configure the public origin with HTTPS at the ingress (Railway terminates TLS);
+the callback client always verifies HTTPS certificates.
+
+Every authenticated nonce is durably consumed before schema/action processing,
+including authenticated requests that later fail. Nonces and receipts share a
+synced, atomically replaced state file. File locks serialize reopened processes,
+and callback ordering uses the same transaction lock. Nonces survive restarts
+and are not automatically expired or pruned. Preserve this persistent directory
+across restarts and key rotation; deleting it discards replay protection.
+
+`submit` returns 202 and records only `quarantined`; a matching retry with a
+**fresh nonce** is idempotent. Any different owner/project/grant/repo/kind/digest
+for an existing job ID returns 409. `status` returns 200; `cancel` returns 200
+and permanently sets `cancelled`. A later submit cannot undo cancellation.
+Unknown jobs return 404 for status/cancel. These receipts are never stored in
+the legacy executable queue and never wake the worker, even if an operator
+independently enables that worker.
+
+Success bodies contain exactly `contract`, `requestNonce`, and
+`job: {id, status}`. The `x-jackboy-proof` is HMAC-SHA256 over
+`jackboy.dispatch/v2\nresponse\n{nonce}\n{HTTP status}\n{raw response body}`.
+Error responses do not confer a successful receipt.
+
+### Signed callbacks and audit
+
+Submit/cancel (including idempotent retries) send the persisted receipt to the
+configured callback; status is read-only apart from nonce consumption/audit.
+The callback contains exactly `contract: "jackboy.dispatch-callback/v2"`,
+`ownerId`, `projectId`, `grantId`, `jobId`, `repo`, `payloadDigest`, and
+`status` (`quarantined` or `cancelled`). Headers are `x-omni-contract`,
+`x-omni-client`, fresh `x-omni-timestamp`/`x-omni-nonce`, and `x-omni-signature`.
+The signature canonical string is:
+
+```
+jackboy.dispatch-callback/v2
+POST
+/api/public/omni/callback
+{client}
+{timestamp}
+{nonce}
+{raw body}
+```
+
+Callbacks have a five-second timeout, an 8192-byte response cap, verified TLS,
+and no redirect following. Only HTTP 200 with a valid `x-omni-proof` over
+`jackboy.dispatch-callback/v2\nresponse\n{nonce}\n200\n{raw response body}`
+and the matching strict `{contract, requestNonce, status}` acknowledgement
+counts as delivery. A failed callback returns 503 to dispatch but retains the
+quarantined/cancelled receipt. Retry the original action with the same scope
+and a fresh nonce; there is no background delivery worker or execution retry.
+
+`dispatch-v2/audit.jsonl` records every request, dispatch outcome, callback
+attempt and callback outcome. It logs fixed event names, HTTP outcome and
+validated job ID/status only, never raw bodies, signatures, keys or tokens.
+Audit/state files are service-owned `0600` under a `0700` directory. Symlinked,
+hard-linked, nonprivate or corrupt files fail closed. Audit failure never
+produces a successful response; a receipt already persisted before failure
+remains held and can be inspected with a fresh authenticated status request.
+If the audit device itself is unavailable, the service emits a fixed stderr
+error and returns 503 rather than silently dropping the audit requirement.
+
+No deployment, variable changes, worker activation or live job submission is
+part of this feature. Before any separately approved rollout, back up persistent
+state, keep both execution and dispatch off, configure the separate keys and
+callback receiver, and validate with isolated fixtures first. Monitor nonce/audit
+storage growth; do not delete replay history as a routine log-rotation step.

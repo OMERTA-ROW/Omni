@@ -71,8 +71,19 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("OMNI_DATA_DIR=%q", dataDir)
+	dispatch, err := inbox.NewDispatchServer(dataDir, inbox.DispatchConfig{
+		Enabled:        os.Getenv("OMNI_DISPATCH_ENABLED") == "true",
+		ClientID:       os.Getenv("OMNI_DISPATCH_CLIENT_ID"),
+		Secret:         os.Getenv("OMNI_DISPATCH_HMAC_SECRET"),
+		CallbackURL:    os.Getenv("JACKBOY_DISPATCH_CALLBACK_URL"),
+		CallbackClient: os.Getenv("OMNI_DISPATCH_CALLBACK_CLIENT_ID"),
+		CallbackSecret: os.Getenv("OMNI_DISPATCH_CALLBACK_SECRET"),
+	}, allowed)
+	if err != nil {
+		log.Fatal(err)
+	}
 	wake := make(chan struct{}, 1)
-	srv := &inbox.Server{APIKey: key, Secret: secret, Version: version, ShellEnabled: shellEnabled, AllowedRepos: allowed, Store: store, Wake: wake}
+	srv := &inbox.Server{APIKey: key, Secret: secret, Version: version, ShellEnabled: shellEnabled, AllowedRepos: allowed, Store: store, Wake: wake, Dispatch: dispatch}
 	wk := &inbox.Worker{Enabled: workerEnabled, Store: store, Secret: secret, CallbackURL: env("JACKBOY_CALLBACK_URL", "https://jackboy-dev-control.lovable.app/api/public/omni/callback"), GitToken: os.Getenv("OMNI_GIT_TOKEN"), ShellUser: shellUser, ShellUID: shellUID, ShellGID: shellGID, ShellExecPath: shellExecPath, Wake: wake}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
