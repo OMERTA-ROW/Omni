@@ -210,3 +210,123 @@ part of this feature. Before any separately approved rollout, back up persistent
 state, keep both execution and dispatch off, configure the separate keys and
 callback receiver, and validate with isolated fixtures first. Monitor nonce/audit
 storage growth; do not delete replay history as a routine log-rotation step.
+
+## Scoped dispatch v3 execution (additional, never enabled automatically)
+
+The same `POST /api/public/jackboy/dispatch` also accepts
+`contract: "jackboy.dispatch/v3"`. V2 remains its unchanged quarantine-only
+protocol. V3 uses the same keys, client, 60-second timestamp window, five-minute
+persisted nonce retention and exact-byte HMAC/proof formats, replacing only the
+contract prefix in those canonical strings. V3 accepts up to 40960 bytes of
+inbound JSON so escaped payloads fit; v2 retains its 8192-byte request limit.
+All requests remain disabled unless `OMNI_DISPATCH_ENABLED=true`.
+
+A v3 submit has the v2 scope fields plus **exactly**:
+- `payload`: a UTF-8 string of at most 6144 bytes. For `test` it is the signed
+  instruction text (never interpreted as a shell command); for `build` it is
+  the patch to apply before testing.
+- `expiresAt`: an integer Unix timestamp in seconds, strictly in the future
+  and no more than 30 minutes from receipt.
+
+The digest is still the lowercase SHA-256 of Jackboy's exact
+`src/lib/omni-dispatch-digest.ts` serialization: `JSON.stringify` of the ordered
+keys `contract: "jackboy.dispatch-payload/v2"`, `ownerId`, `projectId`,
+`grantId`, `jobId`, `repo`, `kind`, `instructions: payload`. This includes the
+wire kind `build`, not the legacy kind `code`. A mismatched digest, expiry,
+extra field or changed immutable scope/payload/expiry is rejected.
+V3 `status` and `cancel` send only the original scope fields, with no payload
+or expiry. Signed success responses retain `{contract,requestNonce,job:{id,status}}`
+with the v3 response proof.
+
+### Execution states and cancellation
+
+V3 state, payloads, results and callback outbox are private persistent files under
+`OMNI_DATA_DIR/dispatch-v3`, separate from both v2 receipts and legacy jobs.
+The states are:
+
+| State | Meaning |
+|---|---|
+| `approved` | A new, digest-verified v3 submit was received with `OMNI_WORKER_ENABLED` exactly `true`. |
+| `quarantined` | Worker was off at submission, or startup interrupted a historical approval/run. Turning the worker on never releases it. |
+| `running` | The single v3 runner claimed a current, unexpired approval. |
+| `completed` | Sandbox tests passed. |
+| `failed` | Clone, patch or tests failed; a bounded result is retained. |
+| `expired` | Approval expired before claim or during execution; it cannot run again. |
+| `cancelled` | Cancellation permanently prevents queued execution or stops the running context/process group. |
+
+Only v3 `approved` jobs can be claimed, only while the worker gate is on, and
+only while expiry and the repository allowlist are still valid. Quarantined
+jobs require a fresh owner-approved grant/job submission; no release endpoint
+is provided. Restart quarantines historical `approved`/`running` records instead
+of resuming them. Completed/failed/cancelled/expired records and callback retries
+survive restart. There is one runner owner per persistent directory; use one
+inbox service replica for this deployment.
+
+`cancel` is idempotent for a held/running/cancelled job and never overwrites an
+already completed/failed/expired result. Persist cancellation before signalling
+the active context; the runner also polls persisted state to observe cancellation
+from another inbox process. Completion cannot overwrite persisted cancellation.
+Grant expiry bounds the entire clone/apply/test execution context; the existing
+test sandbox retains its own default 60-second test deadline and output limits.
+
+Execution calls the existing sandboxed `Worker.Process`: `test` clones and runs
+Go tests; `build` applies the signed patch then tests. It uses the unchanged
+scrubbed Go environment, `omni-sandbox` identity, helper, process cleanup and
+limits. No shell dispatch kind, caller-selected command, push, merge, PR creation
+or deployment is introduced. This is not a new hostile-code isolation boundary;
+the existing filesystem/network/CPU/memory limitations still apply.
+
+### V3 results and durable delivery
+
+Callbacks use `contract`/`x-omni-contract: "jackboy.dispatch-callback/v3"` and the
+same signature, HTTPS/no-redirect, timeout, response-size and proof checks as v2.
+The acknowledgement is the matching strict `{contract,requestNonce,status}`
+object with `x-omni-proof`. A compatible **v3** Jackboy receiver is required;
+the currently referenced v2 receiver is not assumed to accept v3.
+
+Callback statuses are `quarantined`, `cancelled`, `running`, `completed`,
+`failed` and `expired` (`approved` is only a dispatch response state).
+For `completed`/`failed`, add:
+
+```
+"result": {
+  "passed": true,
+  "summary": "bounded, redacted summary",
+  "output": "bounded, redacted test output",
+  "truncated": false
+}
+```
+
+Summary is at most 500 Unicode characters; output at most 6144 UTF-8 bytes.
+Redaction happens before persistence and again before transmission: configured
+secret/token/key/password values, credential assignments, bearer strings,
+common token/JWT/private-key formats, credential URLs and long opaque token-like
+strings are replaced. Heuristic redaction cannot guarantee removal of arbitrary
+encoded or fragmented secrets; tests must still run without credentials.
+Output can be shortened further when JSON escaping would exceed the 8192-byte
+callback envelope; `truncated` is then true. Raw output is never audit-logged.
+
+Transitions enqueue persistent callback snapshots in per-job order. Every pass
+delivers due events across jobs; one job's rejection/backoff never blocks other
+jobs. Later events for the same job wait for the earlier event's acknowledgement
+or dead-lettering. Retries use fresh timestamp/nonce/signature with exponential
+backoff from two seconds, capped at eight total attempts or 24 hours from enqueue,
+whichever comes first. At either limit the event moves to the state's `deadLetters`
+list and an audit entry records the transition. Dead letters contain only job ID,
+status, attempt count, creation/dead-letter timestamps and reason, never payloads
+or results. Delivery then continues, including the next event for that job.
+Older outbox entries without creation timestamps get a conservative first-observed
+timestamp persisted once, so restarts cannot reset their age.
+
+Successful verified ack removes only that outbox event, not the stored job/result.
+Dead-lettering also preserves the original job/result; dead letters are not retried
+automatically. There is no automatic result/dead-letter deletion; monitor both
+lists and disk use. The delivery loop works with execution off, but dispatch
+itself must remain enabled. Callback envelopes remain capped at 8192 bytes.
+
+The v3 runner and callbacks do not confer owner authorization: Jackboy must
+validate its current grant before signing; revocation must send signed cancel.
+No live runtime flag, secret, deployment, migration or worker activation is
+performed by adding this code. Before separately approving deployment, require
+a compatible v3 receiver, isolated grant/cancel/expiry and sandbox evidence, and
+keep both dispatch and execution off until explicitly authorized.
