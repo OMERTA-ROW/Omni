@@ -27,8 +27,9 @@ RUN chmod 0755 /usr/local/bin/omni-entrypoint \
     && find /usr/bin /usr/sbin /bin /sbin -type f -perm /6000 -exec chmod a-s {} + \
     && chown root:omni /usr/local/bin/omni-shell-exec \
     && chmod 4750 /usr/local/bin/omni-shell-exec
-# Starts as root only to prepare $OMNI_LINK_AUDIT_DIR (volume), then drops to uid 10001.
-ENV PORT=8080 OMNI_DATA_DIR=/home/omni/omni-data
+# Starts as root to prepare mounted storage, then drops to uid 10001.
+# /data must be supplied by the host; do not create an ephemeral substitute.
+ENV PORT=8080 OMNI_DATA_DIR=/data OMNI_WORKER_ENABLED=false
 EXPOSE 8080
 # Required env on the host: OMNI_API_KEY, OMNI_CALLBACK_SECRET,
 # OMNI_ALLOWED_REPOS. Optional: JACKBOY_CALLBACK_URL, OMNI_GIT_TOKEN.

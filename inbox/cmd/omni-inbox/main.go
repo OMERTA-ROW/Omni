@@ -6,11 +6,13 @@
 //	OMNI_CALLBACK_SECRET  shared HMAC secret (same value as Jackboy's OMNI_CALLBACK_SECRET)
 //	OMNI_ALLOWED_REPOS    comma-separated owner/repo names OMNI may work on
 //
-// Optional: JACKBOY_CALLBACK_URL, OMNI_DATA_DIR (default ./omni-data), OMNI_GIT_TOKEN, PORT (default 8080).
+// Optional: JACKBOY_CALLBACK_URL, OMNI_DATA_DIR (default /data, must exist),
+// OMNI_WORKER_ENABLED (exactly true to execute), OMNI_GIT_TOKEN, PORT (default 8080).
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -40,14 +42,18 @@ func main() {
 	if len(allowed) == 0 {
 		log.Fatal("OMNI_ALLOWED_REPOS is empty; refusing to accept jobs for any repository")
 	}
-	dataDir := env("OMNI_DATA_DIR", "omni-data")
+	dataDir, err := dataDirectory()
+	if err != nil {
+		log.Fatal(err)
+	}
+	workerEnabled := workerEnabled()
 	shellEnabled := os.Getenv("OMNI_SHELL_ENABLED") == "true"
 	shellUser, shellUID, shellGID := "", uint32(0), uint32(0)
 	shellExecPath := ""
-	if shellEnabled {
+	if shellEnabled || workerEnabled {
 		u, err := user.Lookup("omni-sandbox")
 		if err != nil {
-			log.Fatal("OMNI_SHELL_ENABLED requires the omni-sandbox user")
+			log.Fatal("execution requires the omni-sandbox user")
 		}
 		uid, err := strconv.ParseUint(u.Uid, 10, 32)
 		if err != nil || uid == 0 {
@@ -64,13 +70,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("OMNI_DATA_DIR=%q", dataDir)
 	wake := make(chan struct{}, 1)
 	srv := &inbox.Server{APIKey: key, Secret: secret, Version: version, ShellEnabled: shellEnabled, AllowedRepos: allowed, Store: store, Wake: wake}
-	wk := &inbox.Worker{Store: store, Secret: secret, CallbackURL: env("JACKBOY_CALLBACK_URL", "https://jackboy-dev-control.lovable.app/api/public/omni/callback"), GitToken: os.Getenv("OMNI_GIT_TOKEN"), ShellUser: shellUser, ShellUID: shellUID, ShellGID: shellGID, ShellExecPath: shellExecPath, Wake: wake}
+	wk := &inbox.Worker{Enabled: workerEnabled, Store: store, Secret: secret, CallbackURL: env("JACKBOY_CALLBACK_URL", "https://jackboy-dev-control.lovable.app/api/public/omni/callback"), GitToken: os.Getenv("OMNI_GIT_TOKEN"), ShellUser: shellUser, ShellUID: shellUID, ShellGID: shellGID, ShellExecPath: shellExecPath, Wake: wake}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go wk.Run(ctx)
+	if workerEnabled {
+		go wk.Run(ctx)
+	} else {
+		log.Print("worker execution disabled (OMNI_WORKER_ENABLED is not true)")
+	}
 	hs := &http.Server{Addr: ":" + env("PORT", "8080"), Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -82,6 +93,21 @@ func main() {
 	if err := hs.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func dataDirectory() (string, error) {
+	if dir := os.Getenv("OMNI_DATA_DIR"); dir != "" && dir != "/data" {
+		return dir, nil
+	}
+	info, err := os.Lstat("/data")
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("OMNI_DATA_DIR defaults to /data: mount that writable directory or configure an explicit absolute path")
+	}
+	return "/data", nil
+}
+
+func workerEnabled() bool {
+	return os.Getenv("OMNI_WORKER_ENABLED") == "true"
 }
 
 func env(k, d string) string {

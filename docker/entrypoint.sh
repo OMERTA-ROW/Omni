@@ -11,6 +11,29 @@ fail() { echo "entrypoint: $*" >&2; exit 1; }
 
 [ "$#" -gt 0 ] || fail "no command given"
 
+if [ "${1##*/}" = "omni-inbox" ]; then
+  data="${OMNI_DATA_DIR:-/data}"
+  case "$data" in /*) ;; *) fail "OMNI_DATA_DIR must be absolute" ;; esac
+  [ "$data" != "/" ] || fail "OMNI_DATA_DIR must not be /"
+  [ "$(realpath -m -s -- "$data")" = "$data" ] || fail "OMNI_DATA_DIR must be a normalised path"
+  parent="$(dirname -- "$data")"
+  [ -d "$parent" ] && [ "$(realpath -e -- "$parent")" = "$parent" ] || fail "data parent missing or symlinked"
+  [ ! -L "$data" ] || fail "data directory is a symlink"
+  if [ "$data" = "/data" ]; then
+    [ -d "$data" ] || fail "mount a writable /data directory before starting the inbox"
+  fi
+  if [ "$(id -u)" = "0" ]; then
+    if [ ! -e "$data" ]; then
+      mkdir -m 0700 -- "$data" || fail "cannot create data directory"
+    fi
+    [ -d "$data" ] || fail "data path is not a directory"
+    chown "$RUN_UID:$RUN_GID" -- "$data" || fail "chown data directory failed"
+    chmod 0700 -- "$data" || fail "chmod data directory failed"
+  fi
+  [ -d "$data" ] && [ "$(stat -c '%u:%g %a' -- "$data")" = "$RUN_UID:$RUN_GID 700" ] || fail "data directory must be $RUN_UID:$RUN_GID mode 0700"
+  export OMNI_DATA_DIR="$data"
+fi
+
 dir="${OMNI_LINK_AUDIT_DIR:-}"
 if [ -n "$dir" ]; then
   case "$dir" in /*) ;; *) fail "OMNI_LINK_AUDIT_DIR must be absolute" ;; esac
@@ -50,6 +73,9 @@ fi
 
 if [ "$(id -u)" = "0" ]; then
   export HOME="$RUN_HOME"
+  if [ "${OMNI_WORKER_ENABLED:-}" = "true" ] && [ "${1##*/}" = "omni-inbox" ]; then
+    exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups -- "$@"
+  fi
   if [ "${OMNI_SHELL_ENABLED:-}" = "true" ] && [ "${1##*/}" = "omni-inbox" ]; then
     # The inbox needs exec access to its caller-restricted setuid shell helper.
     exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups -- "$@"

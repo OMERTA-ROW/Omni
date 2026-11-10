@@ -29,6 +29,7 @@ const maxShellOutput = 64 << 10
 // runs the repository's Go tests and reports the real outcome to Jackboy.
 // It never pushes, merges or deploys.
 type Worker struct {
+	Enabled       bool
 	Store         *Store
 	Secret        string
 	CallbackURL   string // fixed by OMNI configuration; a job can never redirect callbacks
@@ -45,8 +46,8 @@ type Worker struct {
 
 // Run processes jobs until ctx ends.
 func (w *Worker) Run(ctx context.Context) {
-	if err := w.Store.RequeueStale(); err != nil {
-		log.Printf("requeue: %v", err)
+	if !w.Enabled {
+		return
 	}
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
@@ -62,6 +63,9 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) drain(ctx context.Context) {
+	if !w.Enabled {
+		return
+	}
 	w.reportPending(ctx)
 	for ctx.Err() == nil {
 		j, err := w.Store.Claim()
@@ -79,6 +83,9 @@ func (w *Worker) drain(ctx context.Context) {
 
 // reportPending delivers finished results; failures stay unreported and are retried next pass.
 func (w *Worker) reportPending(ctx context.Context) {
+	if !w.Enabled {
+		return
+	}
 	jobs, _ := w.Store.Unreported()
 	for _, j := range jobs {
 		if j.Result != nil && w.report(ctx, *j.Result) == nil {
@@ -97,7 +104,8 @@ func (w *Worker) Process(ctx context.Context, j *Job) Result {
 	if strings.TrimSpace(j.Patch) == "" && j.Kind == "code" {
 		return fail("No patch was supplied and OMNI has no code-writing model configured yet, so nothing was changed.")
 	}
-	dir, err := os.MkdirTemp("", "omni-job-")
+	// Reuse the existing privilege helper's validated workspace and containment.
+	dir, err := os.MkdirTemp("/tmp", "omni-shell-")
 	if err != nil {
 		return fail("could not create a workspace: " + err.Error())
 	}
@@ -319,14 +327,18 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 
 // runTests runs `go test ./...` in every Go module of the checkout.
 func (w *Worker) runTests(ctx context.Context, dir string) (bool, string) {
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		return false, "Go toolchain unavailable: " + err.Error()
+	}
 	timeout := w.TestTimeout
 	if timeout == 0 {
-		timeout = 10 * time.Minute
+		timeout = time.Minute
 	}
 	var mods []string
-	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if d.IsDir() && (d.Name() == ".git" || d.Name() == "vendor" || d.Name() == "node_modules") {
 			return filepath.SkipDir
@@ -336,20 +348,48 @@ func (w *Worker) runTests(ctx context.Context, dir string) (bool, string) {
 		}
 		return nil
 	})
+	if err != nil {
+		return false, "Could not discover Go modules: " + err.Error()
+	}
 	if len(mods) == 0 {
 		return false, "No Go module found, so no tests ran."
 	}
-	var all strings.Builder
-	ok := true
+	env := []string{
+		"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
+		"HOME=" + dir,
+		"LANG=C.UTF-8",
+		"GOPATH=" + filepath.Join(dir, ".gopath"),
+		"GOCACHE=" + filepath.Join(dir, ".gocache"),
+		"GOFLAGS=-mod=readonly",
+		"TERM=dumb",
+	}
+	var script strings.Builder
+	script.WriteString("status=0\n")
 	for _, m := range mods {
 		rel, _ := filepath.Rel(dir, m)
-		out, err := run(ctx, m, timeout, "go", "test", "./...")
-		fmt.Fprintf(&all, "$ (%s) go test ./...\n%s\n", rel, out)
-		if err != nil {
-			ok = false
+		fmt.Fprintf(&script, "printf '%%s\\n' %s\n", shellQuote("$ ("+rel+") go test ./..."))
+		fmt.Fprintf(&script, "if ! (cd %s && /usr/bin/env -i", shellQuote(m))
+		for _, value := range env {
+			fmt.Fprintf(&script, " %s", shellQuote(value))
 		}
+		fmt.Fprintf(&script, " %s test ./...); then status=1; fi\n", shellQuote(goPath))
 	}
-	return ok, all.String()
+	script.WriteString("exit \"$status\"\n")
+	// One invocation keeps all modules inside one deadline and lets the helper
+	// reclaim the workspace only after the entire test job finishes.
+	result, err := w.runShell(ctx, dir, script.String(), timeout)
+	output := result.Stdout + result.Stderr
+	if err != nil {
+		output += "\nTest sandbox failed: " + err.Error()
+	}
+	if result.Truncated {
+		output += "\nTest output truncated at 64 KiB per stream."
+	}
+	return err == nil && result.ExitCode == 0, output
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func run(ctx context.Context, dir string, timeout time.Duration, name string, args ...string) (string, error) {

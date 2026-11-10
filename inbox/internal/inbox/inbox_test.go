@@ -30,7 +30,7 @@ func TestSharedVector(t *testing.T) {
 }
 
 func newServer(t *testing.T) (*Server, http.Handler) {
-	st, err := NewStore(t.TempDir())
+	st, err := NewStore(privateTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func shellWorker(t *testing.T) *Worker {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := NewStore(t.TempDir())
+	st, err := NewStore(privateTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,8 +222,13 @@ func gitRepo(t *testing.T) string {
 }
 
 func worker(t *testing.T, repo string, cb string) *Worker {
-	st, _ := NewStore(t.TempDir())
-	return &Worker{Store: st, Secret: secret, CallbackURL: cb, CloneURL: func(string) string { return "file://" + repo }, TestTimeout: 2 * time.Minute}
+	w := shellWorker(t)
+	useTestSandbox(t, w)
+	w.Enabled = true
+	w.Secret, w.CallbackURL = secret, cb
+	w.CloneURL = func(string) string { return "file://" + repo }
+	w.TestTimeout = 2 * time.Minute
+	return w
 }
 
 const breakPatch = `--- a/x.go

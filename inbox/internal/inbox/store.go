@@ -3,10 +3,12 @@ package inbox
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -47,7 +49,7 @@ type Job struct {
 	Patch          string    `json:"patch,omitempty"`
 	Command        string    `json:"command,omitempty"`
 	TimeoutSeconds int       `json:"timeoutSeconds,omitempty"`
-	Status         string    `json:"status"` // queued, running, completed, failed
+	Status         string    `json:"status"` // queued, running, quarantined, completed, failed
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 	Result         *Result   `json:"result,omitempty"`
@@ -62,10 +64,49 @@ type Store struct {
 
 // NewStore creates the data directory if needed.
 func NewStore(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := prepareDataDir(dir); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir}, nil
+	s := &Store{dir: dir}
+	if err := s.QuarantinePending(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func prepareDataDir(dir string) error {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" {
+		return fmt.Errorf("OMNI_DATA_DIR must be a normalized absolute directory, not /")
+	}
+	parent := filepath.Dir(dir)
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolved != parent {
+		return fmt.Errorf("OMNI_DATA_DIR parent must exist without symlinks")
+	}
+	if info, err := os.Lstat(dir); err == nil {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !info.IsDir() || !ok || uint64(stat.Uid) != uint64(os.Geteuid()) {
+			return fmt.Errorf("OMNI_DATA_DIR must be a real directory owned by the service user")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect OMNI_DATA_DIR: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create OMNI_DATA_DIR: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("secure OMNI_DATA_DIR: %w", err)
+	}
+	probe, err := os.CreateTemp(dir, ".writable-")
+	if err != nil {
+		return fmt.Errorf("OMNI_DATA_DIR is not writable by the service user: %w", err)
+	}
+	closeErr := probe.Close()
+	removeErr := os.Remove(probe.Name())
+	if closeErr != nil || removeErr != nil {
+		return fmt.Errorf("verify OMNI_DATA_DIR: %w", errors.Join(closeErr, removeErr))
+	}
+	return nil
 }
 
 func (s *Store) path(id string) string { return filepath.Join(s.dir, id+".json") }
@@ -75,11 +116,31 @@ func (s *Store) write(j *Job) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path(j.ID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.CreateTemp(s.dir, ".job-")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path(j.ID))
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), s.path(j.ID)); err != nil {
+		return err
+	}
+	dir, err := os.Open(s.dir)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (s *Store) read(id string) (*Job, error) {
@@ -126,7 +187,7 @@ func (s *Store) Update(id string, fn func(*Job)) (*Job, error) {
 }
 
 // Claim marks the oldest queued job running and returns it, or nil when the queue is empty.
-// Jobs left "running" by a crash are re-queued on start by RequeueStale.
+// Historical pending jobs are quarantined when the store is opened.
 func (s *Store) Claim() (*Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -157,8 +218,9 @@ func (s *Store) Unreported() ([]*Job, error) {
 	return out, err
 }
 
-// RequeueStale returns interrupted running jobs to the queue.
-func (s *Store) RequeueStale() error {
+// QuarantinePending requires fresh approval/submission with a new job ID before
+// any historical pending work can run again.
+func (s *Store) QuarantinePending() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	jobs, err := s.all()
@@ -166,8 +228,8 @@ func (s *Store) RequeueStale() error {
 		return err
 	}
 	for _, j := range jobs {
-		if j.Status == "running" {
-			j.Status = "queued"
+		if j.Status == "running" || j.Status == "queued" {
+			j.Status, j.UpdatedAt = "quarantined", time.Now().UTC()
 			if err := s.write(j); err != nil {
 				return err
 			}
@@ -183,14 +245,23 @@ func (s *Store) all() ([]*Job, error) {
 	}
 	var jobs []*Job
 	for _, n := range names {
+		info, err := os.Lstat(n)
+		if err != nil {
+			return nil, err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 {
+			return nil, fmt.Errorf("job record must be a regular, unlinked file: %s", filepath.Base(n))
+		}
 		b, err := os.ReadFile(n)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		var j Job
-		if json.Unmarshal(b, &j) == nil {
-			jobs = append(jobs, &j)
+		if err := json.Unmarshal(b, &j); err != nil || !uuidRe.MatchString(j.ID) || filepath.Base(n) != j.ID+".json" {
+			return nil, fmt.Errorf("invalid job record: %s", filepath.Base(n))
 		}
+		jobs = append(jobs, &j)
 	}
 	sort.Slice(jobs, func(a, b int) bool { return jobs[a].CreatedAt.Before(jobs[b].CreatedAt) })
 	return jobs, nil
