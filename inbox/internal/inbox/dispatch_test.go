@@ -495,6 +495,159 @@ func TestDispatchConfigurationAndDisabledEndpoint(t *testing.T) {
 	}
 }
 
+func TestDispatchUnauthenticatedRequestsDoNotTouchStorage(t *testing.T) {
+	s := dispatchFixture(t, nil)
+	raw := dispatchTestBody("submit", dispatchTestScope())
+	for _, existingAudit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing_audit_%v", existingAudit), func(t *testing.T) {
+			if existingAudit {
+				if err := s.audit("fixture", "", "", 0); err != nil {
+					t.Fatal(err)
+				}
+				// Pre-auth rejections must not even depend on writable audit files.
+				if err := os.Chmod(filepath.Join(s.dir, "audit.jsonl"), 0o400); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(filepath.Join(s.dir, "audit.jsonl"))
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"disabled", "client", "timestamp", "nonce", "signature", "oversize"} {
+				t.Run(name, func(t *testing.T) {
+					req := dispatchTestRequest(raw, strings.Repeat("a", 32))
+					code := 401
+					switch name {
+					case "disabled":
+						s.config.Enabled = false
+						defer func() { s.config.Enabled = true }()
+						code = 503
+					case "client":
+						req.Header.Set("X-Jackboy-Client", "wrong")
+					case "timestamp":
+						req.Header.Set("X-Jackboy-Timestamp", strconv.FormatInt(time.Now().Add(-61*time.Second).Unix(), 10))
+					case "nonce":
+						req.Header.Set("X-Jackboy-Nonce", "wrong")
+					case "signature":
+						req.Header.Set("X-Jackboy-Signature", strings.Repeat("0", 64))
+					case "oversize":
+						req = dispatchTestRequest(bytes.Repeat([]byte(" "), dispatchMaxBody+1), strings.Repeat("a", 32))
+						code = 400
+					}
+					if w := serveDispatch(s, req); w.Code != code {
+						t.Fatalf("got %d, want %d", w.Code, code)
+					}
+					after, err := os.ReadFile(filepath.Join(s.dir, "audit.jsonl"))
+					if err != nil && (!os.IsNotExist(err) || existingAudit) {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(before, after) {
+						t.Fatal("unauthenticated request changed audit")
+					}
+					entries, err := os.ReadDir(s.dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, entry := range entries {
+						if !existingAudit || (entry.Name() != "audit.jsonl" && entry.Name() != "audit.lock") {
+							t.Fatalf("pre-auth request created storage: %s", entry.Name())
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestDispatchNoncePruningPreservesReplayWindow(t *testing.T) {
+	s := dispatchFixture(t, nil)
+	now := time.Now().Unix()
+	old, recent, future := strings.Repeat("a", 32), strings.Repeat("b", 32), strings.Repeat("c", 32)
+	state := dispatchState{
+		Nonces: map[string]dispatchNonceTime{
+			old: dispatchNonceTime(now - 301), recent: dispatchNonceTime(now - 30),
+			future: dispatchNonceTime(now + 30),
+		},
+		Jobs: map[string]dispatchJob{},
+	}
+	if err := s.writeState(state); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewDispatchServer(filepath.Dir(s.dir), s.config, s.allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := reopened.readState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := persisted.Nonces[old]; exists || len(persisted.Nonces) != 2 {
+		t.Fatalf("incorrect pruning: %+v", persisted.Nonces)
+	}
+	raw := dispatchTestBody("submit", dispatchTestScope())
+	for _, nonce := range []string{recent, future} {
+		req := dispatchTestRequest(raw, nonce)
+		ts := strconv.FormatInt(int64(persisted.Nonces[nonce]), 10)
+		req.Header.Set("X-Jackboy-Timestamp", ts)
+		req.Header.Set("X-Jackboy-Signature", jackboyTestHMAC(dispatchTestSecret,
+			dispatchContract+"\nPOST\n"+dispatchPath+"\njackboy-test\n"+ts+"\n"+nonce+"\n"+string(raw)))
+		if w := serveDispatch(reopened, req); w.Code != 409 {
+			t.Fatalf("within-window replay accepted: %d", w.Code)
+		}
+	}
+	req := dispatchTestRequest(raw, old)
+	ts := strconv.FormatInt(now-301, 10)
+	req.Header.Set("X-Jackboy-Timestamp", ts)
+	req.Header.Set("X-Jackboy-Signature", jackboyTestHMAC(dispatchTestSecret,
+		dispatchContract+"\nPOST\n"+dispatchPath+"\njackboy-test\n"+ts+"\n"+old+"\n"+string(raw)))
+	if w := serveDispatch(reopened, req); w.Code != 401 {
+		t.Fatalf("pruned stale replay accepted: %d", w.Code)
+	}
+	// writeState prunes on every call, not only after reopening.
+	persisted.Nonces[old] = dispatchNonceTime(now - 301)
+	if err := reopened.writeState(persisted); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := persisted.Nonces[old]; exists {
+		t.Fatal("write did not prune expired nonce")
+	}
+}
+
+func TestDispatchLegacyNonceMigration(t *testing.T) {
+	s := dispatchFixture(t, nil)
+	nonce := strings.Repeat("a", 32)
+	old := fmt.Sprintf(`{"nonces":{%q:true},"jobs":{}}`, nonce)
+	if err := os.WriteFile(filepath.Join(s.dir, "state.json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Unix()
+	reopened, err := NewDispatchServer(filepath.Dir(s.dir), s.config, s.allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := reopened.readState()
+	if err != nil || int64(state.Nonces[nonce]) < start {
+		t.Fatalf("legacy entry not conservatively migrated: %+v %v", state, err)
+	}
+	if w := serveDispatch(reopened, dispatchTestRequest(dispatchTestBody("submit", dispatchTestScope()), nonce)); w.Code != 409 {
+		t.Fatalf("legacy nonce replay accepted: %d", w.Code)
+	}
+	if err := reopened.writeState(state); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(s.dir, "state.json"))
+	if err != nil || bytes.Contains(raw, []byte("true")) {
+		t.Fatalf("migration not persisted as timestamps: %s %v", raw, err)
+	}
+	for _, invalid := range []string{"false", "null", "0", "-1", `"123"`, "1.5"} {
+		if err := os.WriteFile(filepath.Join(s.dir, "state.json"), []byte(fmt.Sprintf(`{"nonces":{%q:%s},"jobs":{}}`, nonce, invalid)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reopened.readState(); err == nil {
+			t.Fatalf("invalid nonce timestamp accepted: %s", invalid)
+		}
+	}
+}
 func TestDispatchAuditAndStorageFailClosed(t *testing.T) {
 	s := dispatchFixture(t, nil)
 	raw := dispatchTestBody("submit", dispatchTestScope())

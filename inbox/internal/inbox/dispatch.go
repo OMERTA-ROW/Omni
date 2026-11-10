@@ -64,8 +64,25 @@ type dispatchJob struct {
 }
 
 type dispatchState struct {
-	Nonces map[string]bool        `json:"nonces"`
-	Jobs   map[string]dispatchJob `json:"jobs"`
+	Nonces map[string]dispatchNonceTime `json:"nonces"`
+	Jobs   map[string]dispatchJob       `json:"jobs"`
+}
+
+type dispatchNonceTime int64
+
+func (timestamp *dispatchNonceTime) UnmarshalJSON(raw []byte) error {
+	// Legacy entries have no timestamp. Retain them for a full five minutes
+	// from migration rather than guessing an age that could allow a replay.
+	if bytes.Equal(raw, []byte("true")) {
+		*timestamp = dispatchNonceTime(time.Now().Unix())
+		return nil
+	}
+	var seconds int64
+	if err := json.Unmarshal(raw, &seconds); err != nil || seconds <= 0 {
+		return fmt.Errorf("invalid persisted dispatch nonce timestamp")
+	}
+	*timestamp = dispatchNonceTime(seconds)
+	return nil
 }
 
 // DispatchServer stores receipts separately from the executable legacy queue.
@@ -108,17 +125,7 @@ func NewDispatchServer(dataDir string, config DispatchConfig, allowed map[string
 
 func (s *DispatchServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	if err := s.audit("dispatch_received", "", "", 0); err != nil {
-		log.Print("dispatch audit unavailable")
-		http.Error(w, "audit unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	code, body, nonce := s.handle(r)
-	if err := s.audit("dispatch_result", "", "", code); err != nil {
-		log.Print("dispatch result audit unavailable")
-		http.Error(w, "audit unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	if code == http.StatusOK || code == http.StatusAccepted {
 		w.Header().Set("X-Jackboy-Proof", HMACHex(s.config.Secret,
@@ -159,7 +166,19 @@ func (s *DispatchServer) handle(r *http.Request) (int, []byte, string) {
 	if !dispatchHexRE.MatchString(signature) || subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) != 1 {
 		return dispatchError(http.StatusUnauthorized, "authentication_failed")
 	}
+	if err := s.audit("dispatch_received", "", "", 0); err != nil {
+		log.Print("dispatch audit unavailable")
+		return dispatchError(http.StatusServiceUnavailable, "audit_unavailable")
+	}
+	code, body, responseNonce := s.handleAuthenticated(r, raw, nonce, seconds)
+	if err := s.audit("dispatch_result", "", "", code); err != nil {
+		log.Print("dispatch result audit unavailable")
+		return dispatchError(http.StatusServiceUnavailable, "audit_unavailable")
+	}
+	return code, body, responseNonce
+}
 
+func (s *DispatchServer) handleAuthenticated(r *http.Request, raw []byte, nonce string, seconds int64) (int, []byte, string) {
 	// Serialize across goroutines AND reopened stores/processes. The nonce is
 	// synced before any state change, and callback ordering shares this lock.
 	lock, err := s.lock("state.lock")
@@ -171,10 +190,10 @@ func (s *DispatchServer) handle(r *http.Request) (int, []byte, string) {
 	if err != nil {
 		return dispatchError(http.StatusServiceUnavailable, "storage_unavailable")
 	}
-	if state.Nonces[nonce] {
+	if _, used := state.Nonces[nonce]; used {
 		return dispatchError(http.StatusConflict, "nonce_replayed")
 	}
-	state.Nonces[nonce] = true
+	state.Nonces[nonce] = dispatchNonceTime(seconds)
 	if err := s.writeState(state); err != nil {
 		return dispatchError(http.StatusServiceUnavailable, "storage_unavailable")
 	}
@@ -369,7 +388,7 @@ func (s *DispatchServer) readState() (dispatchState, error) {
 	var state dispatchState
 	f, err := s.privateFile("state.json", os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
-		return dispatchState{Nonces: map[string]bool{}, Jobs: map[string]dispatchJob{}}, nil
+		return dispatchState{Nonces: map[string]dispatchNonceTime{}, Jobs: map[string]dispatchJob{}}, nil
 	}
 	if err != nil {
 		return state, err
@@ -386,8 +405,8 @@ func (s *DispatchServer) readState() (dispatchState, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return state, fmt.Errorf("dispatch state has trailing data")
 	}
-	for nonce, used := range state.Nonces {
-		if !dispatchNonceRE.MatchString(nonce) || !used {
+	for nonce, timestamp := range state.Nonces {
+		if !dispatchNonceRE.MatchString(nonce) || timestamp <= 0 {
 			return state, fmt.Errorf("invalid persisted dispatch nonce")
 		}
 	}
@@ -400,6 +419,12 @@ func (s *DispatchServer) readState() (dispatchState, error) {
 }
 
 func (s *DispatchServer) writeState(state dispatchState) error {
+	cutoff := time.Now().Add(-5 * time.Minute).Unix()
+	for nonce, timestamp := range state.Nonces {
+		if int64(timestamp) < cutoff {
+			delete(state.Nonces, nonce)
+		}
+	}
 	raw, err := json.Marshal(state)
 	if err != nil {
 		return err

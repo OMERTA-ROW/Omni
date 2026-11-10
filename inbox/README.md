@@ -143,8 +143,12 @@ the callback client always verifies HTTPS certificates.
 Every authenticated nonce is durably consumed before schema/action processing,
 including authenticated requests that later fail. Nonces and receipts share a
 synced, atomically replaced state file. File locks serialize reopened processes,
-and callback ordering uses the same transaction lock. Nonces survive restarts
-and are not automatically expired or pruned. Preserve this persistent directory
+and callback ordering uses the same transaction lock. Nonces survive restarts,
+store their signed request timestamp, and are pruned on each state write once
+older than five minutes. Requests outside the 60-second timestamp window are
+rejected before storage access, so pruning cannot admit a stale signed replay.
+Legacy boolean `true` entries are conservatively timestamped at migration time
+and persisted in the new numeric format on the next write. Preserve this persistent directory
 across restarts and key rotation; deleting it discards replay protection.
 
 `submit` returns 202 and records only `quarantined`; a matching retry with a
@@ -188,7 +192,7 @@ counts as delivery. A failed callback returns 503 to dispatch but retains the
 quarantined/cancelled receipt. Retry the original action with the same scope
 and a fresh nonce; there is no background delivery worker or execution retry.
 
-`dispatch-v2/audit.jsonl` records every request, dispatch outcome, callback
+`dispatch-v2/audit.jsonl` records every authenticated request, dispatch outcome, callback
 attempt and callback outcome. It logs fixed event names, HTTP outcome and
 validated job ID/status only, never raw bodies, signatures, keys or tokens.
 Audit/state files are service-owned `0600` under a `0700` directory. Symlinked,
@@ -197,6 +201,9 @@ produces a successful response; a receipt already persisted before failure
 remains held and can be inspected with a fresh authenticated status request.
 If the audit device itself is unavailable, the service emits a fixed stderr
 error and returns 503 rather than silently dropping the audit requirement.
+Requests rejected before successful signature verification (including disabled
+dispatch, invalid credentials/timestamps/nonces/signatures and oversized bodies)
+perform no audit/state writes or fsyncs and retain their normal error codes.
 
 No deployment, variable changes, worker activation or live job submission is
 part of this feature. Before any separately approved rollout, back up persistent
