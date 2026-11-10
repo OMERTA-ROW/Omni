@@ -85,9 +85,13 @@ func main() {
 	wake := make(chan struct{}, 1)
 	srv := &inbox.Server{APIKey: key, Secret: secret, Version: version, ShellEnabled: shellEnabled, AllowedRepos: allowed, Store: store, Wake: wake, Dispatch: dispatch}
 	wk := &inbox.Worker{Enabled: workerEnabled, Store: store, Secret: secret, CallbackURL: env("JACKBOY_CALLBACK_URL", "https://jackboy-dev-control.lovable.app/api/public/omni/callback"), GitToken: os.Getenv("OMNI_GIT_TOKEN"), ShellUser: shellUser, ShellUID: shellUID, ShellGID: shellGID, ShellExecPath: shellExecPath, Wake: wake}
+	if err := dispatch.EnableV3(wk); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go dispatch.RunV3(ctx)
 	if workerEnabled {
 		go wk.Run(ctx)
 	} else {

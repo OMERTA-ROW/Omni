@@ -1,6 +1,7 @@
 package inbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -92,6 +93,7 @@ type DispatchServer struct {
 	dir     string
 	allowed map[string]bool
 	http    *http.Client
+	v3      *DispatchV3
 }
 
 func NewDispatchServer(dataDir string, config DispatchConfig, allowed map[string]bool) (*DispatchServer, error) {
@@ -124,6 +126,21 @@ func NewDispatchServer(dataDir string, config DispatchConfig, allowed map[string
 }
 
 func (s *DispatchServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.v3 != nil && s.config.Enabled {
+		buffered := bufio.NewReaderSize(r.Body, dispatchMaxBody+1)
+		raw, err := buffered.Peek(dispatchMaxBody + 1)
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{buffered, r.Body}
+		var version struct {
+			Contract string `json:"contract"`
+		}
+		if (err == nil || err == io.EOF) && json.Unmarshal(raw, &version) == nil && version.Contract == dispatchV3Contract {
+			s.v3.ServeHTTP(w, r)
+			return
+		}
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	code, body, nonce := s.handle(r)
 	w.Header().Set("Content-Type", "application/json")
