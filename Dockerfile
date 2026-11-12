@@ -33,7 +33,7 @@ ENV PORT=8080 OMNI_DATA_DIR=/data OMNI_WORKER_ENABLED=false
 EXPOSE 8080
 # Required env on the host: OMNI_API_KEY, OMNI_CALLBACK_SECRET,
 # OMNI_ALLOWED_REPOS. Optional: JACKBOY_CALLBACK_URL, OMNI_GIT_TOKEN.
-# Shell execution is opt-in with OMNI_SHELL_ENABLED=true; commands run as omni-sandbox.
+# Worker and shell execution are blocked at startup pending verified isolation.
 # See inbox/README.md for details.
 ENTRYPOINT ["omni-entrypoint"]
 CMD ["omni-inbox"]
