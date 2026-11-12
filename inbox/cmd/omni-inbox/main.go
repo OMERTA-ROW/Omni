@@ -7,7 +7,7 @@
 //	OMNI_ALLOWED_REPOS    comma-separated owner/repo names OMNI may work on
 //
 // Optional: JACKBOY_CALLBACK_URL, OMNI_DATA_DIR (default /data, must exist),
-// OMNI_WORKER_ENABLED (exactly true to execute), OMNI_GIT_TOKEN, PORT (default 8080).
+// OMNI_WORKER_ENABLED, OMNI_SHELL_ENABLED, OMNI_GIT_TOKEN, PORT (default 8080).
 package main
 
 import (
@@ -48,6 +48,9 @@ func main() {
 	}
 	workerEnabled := workerEnabled()
 	shellEnabled := os.Getenv("OMNI_SHELL_ENABLED") == "true"
+	if err := validateExecutionConfig(workerEnabled, shellEnabled); err != nil {
+		log.Fatal(err)
+	}
 	shellUser, shellUID, shellGID := "", uint32(0), uint32(0)
 	shellExecPath := ""
 	if shellEnabled || workerEnabled {
@@ -123,6 +126,13 @@ func dataDirectory() (string, error) {
 
 func workerEnabled() bool {
 	return os.Getenv("OMNI_WORKER_ENABLED") == "true"
+}
+
+func validateExecutionConfig(workerEnabled, shellEnabled bool) error {
+	if workerEnabled || shellEnabled {
+		return fmt.Errorf("execution is unavailable: the existing runner lacks a verified isolation boundary; leave OMNI_WORKER_ENABLED and OMNI_SHELL_ENABLED disabled")
+	}
+	return nil
 }
 
 func env(k, d string) string {
