@@ -54,10 +54,11 @@ hostile-code boundary. Do not enable Jackboy autonomous mode.
 - [ ] On an isolated staging system, test authenticated HTTPS, handshake and
   rejection of bad, replayed, expired and wrong-scope signatures; verify grants
   and revocation against the actual Jackboy and Mothership integrations.
-- [ ] Design, implement and independently verify an isolated executor with
-  host-secret exclusion, filesystem and network isolation, CPU/memory/process
-  and time limits, and reliable termination. Diagnostics and proposals must not
-  authorize execution; approval must be owner/project/job-bound and current.
+- [ ] Independently verify the separate `sandbox/` executor's host-secret
+  exclusion, filesystem and network isolation, CPU/memory/process and time
+  limits, and reliable termination on isolated Linux staging. Diagnostics and
+  proposals must not authorize execution; approval must be
+  owner/project/job-bound and current.
 - [ ] Verify a separately approved isolated `printf` job, job ID, bounded
   streaming, concurrent session isolation, persistent audit/status, cancellation,
   timeout, emergency stop and restart recovery; reject unapproved jobs. Test
@@ -66,6 +67,26 @@ hostile-code boundary. Do not enable Jackboy autonomous mode.
   live controls, budget enforcement and explicit owner authorization before
   considering any production execution. Never use a diagnostic or handshake as
   execution approval.
+
+## Separate workspace sandbox status
+
+The `sandbox/` service is a separate, disabled-by-default implementation of
+Mothership's `omni.workspace/v1` shell contract. It requires signed
+client/project-bound requests, preserves the existing owner decision flow, and
+does not enable CODE autonomy or Jackboy jobs. It uses isolated per-session
+bubblewrap namespaces and bounded tmpfs, process, file, address-space, CPU-time,
+wall-time and output limits; it re-engages Emergency Stop and quarantines
+unfinished jobs on restart. See `sandbox/README.md` for deployment and staging
+test instructions.
+
+The Node unit suite and Linux supervisor cross-builds pass locally. The real
+Linux containment suite is opt-in and was not run here: this checkout is on
+macOS, no bubblewrap/unshare runtime is installed, and the Docker daemon is
+unavailable. The implementation is therefore unverified for hostile-code
+containment and Mothership interoperability. Do not connect it to production
+or clear its stop latch until the documented isolated staging checks pass and
+the owner separately authorizes a live sandbox test. No database migration is
+introduced; persistent job state needs a dedicated `/data` volume.
 
 ## Configuration names
 
@@ -83,6 +104,14 @@ Scoped link: `JACKBOY_LINK_ORIGIN`, `OMNI_LINK_CLIENT_ID`,
 inventory of values configured on Railway.
 
 Mothership workspace integration: `OMNI_SANDBOX_ORIGIN`,
-`OMNI_SANDBOX_CLIENT_ID`, `OMNI_SANDBOX_HMAC_SECRET`, `OMNI_SANDBOX_ENABLED`.
+`OMNI_SANDBOX_CLIENT_ID`, `OMNI_SANDBOX_HMAC_SECRET`,
+`OMNI_SANDBOX_CONTROL_SECRET`, `OMNI_SANDBOX_PROJECT_ID`,
+`OMNI_SANDBOX_ENABLED`, `OMNI_SANDBOX_DATA_DIR`,
+`OMNI_SANDBOX_COMMAND_TIMEOUT_SEC`, `OMNI_SANDBOX_CPU_SEC`,
+`OMNI_SANDBOX_MEMORY_MB`, `OMNI_SANDBOX_MAX_PROCESSES`,
+`OMNI_SANDBOX_FILE_MB`, `OMNI_SANDBOX_OUTPUT_CAP_BYTES`,
+`OMNI_SANDBOX_MAX_SESSIONS`, `OMNI_SANDBOX_WORKSPACE_MB`,
+`OMNI_SANDBOX_WORKSPACE_INODES`, `OMNI_SANDBOX_BWRAP`,
+`OMNI_SANDBOX_SUPERVISOR`.
 Jackboy v3 sender: `JACKBOY_DISPATCH_V3_ENABLED`, `OMNI_DISPATCH_ORIGIN`,
 `OMNI_DISPATCH_CLIENT_ID`, `OMNI_DISPATCH_HMAC_SECRET`, `OMNI_DISPATCH_CA_FILE`.
