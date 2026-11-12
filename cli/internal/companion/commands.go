@@ -1,4 +1,4 @@
-// Package companion implements a deliberately offline, opt-in source prototype.
+// Package companion implements an opt-in source prototype with explicit dock requests.
 package companion
 
 import (
@@ -96,7 +96,7 @@ func findCommandsWithExtensions(name, path, platform, pathExt string) []string {
 }
 
 func Help(w io.Writer) {
-	fmt.Fprintln(w, `EVOLUTION CLI — offline, unsigned source prototype; no distributed release.
+	fmt.Fprintln(w, `EVOLUTION CLI — unsigned source prototype; no distributed release.
 Optional companion for your existing terminal, not a replacement terminal.
 
 Local source commands:
@@ -120,6 +120,10 @@ Local source commands:
                              --change binds the run record to a reviewed manifest.
   evolution omni route "<goal>" --project <dir> [--json]
                              Shows OMNI routing for a project; no model is called
+  evolution dock pair --url <https-origin> --code XXXXX-XXXXX --label "<name>"
+  evolution dock status | stop | forget
+  evolution dock propose --kind <kind> --project <id> --repo OWNER/REPO --instructions <text>
+                             Signed OMNI Dock request; proposals are held only
   evolution release verify --dir <staged-release> [--json]
                              Checks SHA256SUMS; reports UNSIGNED unless signature files exist
   evolution release manifest --dir <staged-release> [--json]
@@ -127,7 +131,7 @@ Local source commands:
   evolution release matrix [--json]
                               Honest per-target support: build, signing, install/update/rollback
 
-PLANNED / BLOCKED — no authentication, API calls or tool execution:
+PLANNED / BLOCKED — no account login or arbitrary tool execution:
   evolution login
   evolution connect github
   evolution nexus
@@ -136,9 +140,11 @@ PLANNED / BLOCKED — no authentication, API calls or tool execution:
   omni                       Direct interactive OMNI, once authorized
   evolution omni             Collision-safe fallback, once authorized
 
-No keys accepted; no network calls, telemetry, shell startup/PATH edits or other
-agent/tool modifications. Install/uninstall require a new explicit directory and
-approval. Source builds are NOT signed release packages. No AI model connected.`)
+Dock requests use a dedicated local ECDSA key and signed HTTPS calls. Proposals
+are held in OMNI; no commands run and no autonomy is enabled. No telemetry,
+shell startup/PATH edits or other agent/tool modifications. Install/uninstall
+require a new explicit directory and approval. Source builds are NOT signed
+release packages. No AI model connected.`)
 }
 
 func Run(args []string, invoked string, out, errOut io.Writer) int {
@@ -205,6 +211,8 @@ func Run(args []string, invoked string, out, errOut io.Writer) int {
 		return runSandboxCmd(args[1:], out, errOut)
 	case "release":
 		return runRelease(args[1:], out, errOut)
+	case "dock":
+		return runDock(args[1:], out, errOut)
 	case "omni":
 		if len(args) > 1 && args[1] == "route" {
 			return runRoute(args[2:], out, errOut)

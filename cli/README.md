@@ -1,4 +1,4 @@
-# EVOLUTION CLI — unreleased offline source
+# EVOLUTION CLI — unreleased source
 
 Lightweight, optional companion for **existing** macOS/Linux/Windows terminals.
 Not a terminal emulator, daemon, installer service or replacement for Codex,
@@ -8,12 +8,15 @@ Claude, GPT, Unity, Blender or other tools. Browser preview requires no download
 
 Basic access is not contingent on a recurring Evolution subscription, hosted
 compute or a replacement IDE. Keep existing investments and authorized tools.
-This offline source performs no paid API calls and requires no account; that is
-not a promise of free AI. Open-source local utilities are intended where
-financially feasible, but the owner's source/distribution license is still
-unapproved. Do not infer an open-source license from source visibility. Project
-file diagnostics are not implemented. Opt-in PATH-name developer-tool discovery is implemented in offline source; browser
-capability discovery is an inert reference catalog, not installed-tool probing.
+This CLI makes no paid API/model calls and requires no Evolution account.
+OMNI Dock contacts only the owner's Mothership for signed pairing, status, held
+proposals, and Emergency Stop requests; it never dispatches jobs. That is not a
+promise of free AI. Open-source local utilities are intended where financially
+feasible, but the owner's source/distribution license is still unapproved. Do
+not infer an open-source license from source visibility. Project file diagnostics
+are not implemented. Opt-in PATH-name developer-tool discovery is implemented
+in the source CLI; browser capability discovery is an inert reference catalog,
+not installed-tool probing.
 
 Future adapters require opt-in official APIs, supported provider capabilities,
 secure settings/OS key custody, explicit context and actual usage-cost reporting.
@@ -88,10 +91,11 @@ credential intake, token echo, file writes or success claims. Unknown arguments
 also return 2. Errors never repeat supplied credentials. Help/version/doctor
 return 0; failed local install/uninstall returns 1.
 
-No OAuth, API model, arbitrary shell execution, download, updater, repository connection,
-agent enumeration, media processing, provider billing or automatic integration
-is implemented. Do not pass keys via command arguments. The implementation has
-no network client or credential store, and does not consume API-key env vars.
+No OAuth, API model, arbitrary shell execution, download, updater, repository
+connection, agent enumeration, media processing, provider billing or automatic
+integration is implemented. Network access is limited to explicit HTTPS OMNI
+Dock requests; there is no general API/model client or API-key credential store.
+Do not pass keys via command arguments. The CLI does not consume API-key env vars.
 
 ### Project targeting and local test records
 
@@ -123,6 +127,40 @@ JSON output is optional local stdout, not an automatic file write. Tools outside
 PATH and aliases can be missed. File-name presence is not authenticity, version
 support or verified compatibility. Suggestions are disabled/planned references,
 not installed or connected extensions. No signed distribution is available.
+
+## OMNI Dock
+
+Docking lets this CLI identify one device to the OMNI Mothership and make
+limited signed requests. It does not execute commands, dispatch jobs, or turn
+on autonomy. Use the Mothership's Docking Bay to create a one-time pairing code,
+then run:
+
+```text
+evolution dock pair --url https://<mothership-origin> --code XXXXX-XXXXX --label "My computer"
+```
+
+Compare the displayed safety code with the Docking Bay before approving the
+device there. The CLI creates a dedicated ECDSA P-256 key; its private key and
+device state are stored in the OS user config directory under `evolution/dock`
+with directory mode 0700 and file mode 0600 on POSIX systems. The private key
+is never printed. This source client stores the key as a local file; it does not
+use a platform keychain. Requests require HTTPS and refuse redirects.
+
+```text
+evolution dock status
+evolution dock propose --kind code.test --project <project-id> --repo OWNER/REPO --instructions "Run the focused tests"
+evolution dock stop
+evolution dock forget
+```
+
+`status` reports the paired device's state, permissions, Emergency Stop, and
+executor. `propose` sends a `jackboy` job proposal that OMNI holds for its owner;
+it never includes an autonomy request or runs the job. Instructions detected as
+secret-like are refused. `stop` only engages the Emergency Stop and cannot
+release it. `forget` removes only the local key and device-state files; it does
+not revoke the server-side device, which must be revoked in the Docking Bay.
+Pairing or requests require a published Mothership with the dock endpoints
+available.
 
 ## Builds and unsigned archive staging
 
