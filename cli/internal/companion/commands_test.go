@@ -29,7 +29,7 @@ func TestHelp(t *testing.T) {
 	if Run([]string{"help"}, "evolution", &out, &err) != 0 {
 		t.Fatal("help")
 	}
-	for _, command := range []string{"doctor", "connect", "login", "nexus", "agents", "update", "version", "evolution omni"} {
+	for _, command := range []string{"doctor", "connect", "login", "nexus", "agents", "update", "version", "dock", "evolution omni"} {
 		if !strings.Contains(out.String(), command) {
 			t.Fatal(command)
 		}
