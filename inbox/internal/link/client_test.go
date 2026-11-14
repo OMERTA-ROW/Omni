@@ -395,6 +395,47 @@ func TestHandshakeLockRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestConcurrentHandshakeLockCreation(t *testing.T) {
+	dir := t.TempDir()
+	const clients = 16
+	stores := make([]*FileHandshakeStateStore, clients)
+	for i := range stores {
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = root.Close() })
+		stores[i] = NewFileHandshakeStateStore(root, dir)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, clients)
+	var active atomic.Int32
+	for _, store := range stores {
+		go func(store *FileHandshakeStateStore) {
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			guard, err := store.Lock(ctx)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if active.Add(1) != 1 {
+				t.Error("concurrent callers entered the same critical section")
+			}
+			time.Sleep(time.Millisecond)
+			active.Add(-1)
+			errs <- guard.Close()
+		}(store)
+	}
+	close(start)
+	for range clients {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent lock creation failed: %v", err)
+		}
+	}
+}
+
 func boolPointer(value bool) *bool       { return &value }
 func stringPointer(value string) *string { return &value }
 func intPointer(value int) *int          { return &value }

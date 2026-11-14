@@ -72,7 +72,12 @@ func (s *FileHandshakeStateStore) Lock(ctx context.Context) (HandshakeStateGuard
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("handshake state lock unavailable")
 	}
-	lock, err := s.root.OpenFile(handshakeLockFile, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	// Separate creation from reopening: concurrent non-exclusive O_CREAT opens
+	// can return ENOENT on Darwin even when the other creator left the file present.
+	lock, err := s.root.OpenFile(handshakeLockFile, os.O_CREATE|os.O_EXCL|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if errors.Is(err, os.ErrExist) {
+		lock, err = s.root.OpenFile(handshakeLockFile, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("handshake state lock open failed: %w", err)
 	}
