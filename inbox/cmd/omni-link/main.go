@@ -18,8 +18,8 @@ func main() {
 	}
 }
 func run() error {
-	if len(os.Args) != 3 && !(len(os.Args) == 2 && os.Args[1] == "handshake") {
-		return fmt.Errorf("usage: omni-link handshake OR omni-link <submit|run|status|cancel> <job-uuid>")
+	if len(os.Args) != 3 && !(len(os.Args) == 2 && (os.Args[1] == "handshake" || os.Args[1] == "safety")) {
+		return fmt.Errorf("usage: omni-link handshake|safety OR omni-link <submit|run|status|cancel> <job-uuid>")
 	}
 	dir := os.Getenv("OMNI_LINK_AUDIT_DIR")
 	if !filepath.IsAbs(dir) {
@@ -54,10 +54,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	c.HandshakeStore = link.NewFileHandshakeStateStore(root, dir)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if os.Args[1] == "handshake" {
 		state, err := c.Connect(ctx)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(state)
+	}
+	if os.Args[1] == "safety" {
+		state, err := c.Safety(ctx)
 		if err != nil {
 			return err
 		}
