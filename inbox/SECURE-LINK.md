@@ -47,7 +47,7 @@ a nonce-bound proof and
 under HTTP 409. Only that authenticated conflict rotates the ID. Generic
 transport, audit, unsigned-conflict or storage failures never trigger a fresh
 handshake.
-This requires Jackboy's matching endpoint and migration `0071_omni_idempotent_handshake.sql`;
+This requires Jackboy's matching endpoint and migration `0073_omni_idempotent_handshake.sql`;
 local companion tests do not establish that either is installed in production.
 The lock and state files are both opened relative to the same `os.Root`, so
 replacing the audit directory's pathname cannot separate the lock from its state.
