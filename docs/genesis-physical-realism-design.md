@@ -21,3 +21,20 @@ Improve character impact, loss-of-balance, knockout and fall animation with beli
 
 ## Architecture
 Genesis specifies realism constraints and scenarios; OMNI coordinates authorized engine-specific implementation; Jackboy validates tests and rollback. Initial showcase: Rise of the Kings. This does not modify Grand Theft Auto or any third-party title.
+
+## Locomotion, gait and posture realism
+- Adapt step length, cadence, foot placement, pelvis motion, balance and torso posture to speed, slope, surface friction, obstacles, fatigue, injuries and character state.
+- Use motion matching or responsive locomotion blending with foot IK and grounded contacts to reduce foot sliding and repetitive gait loops.
+- Preserve continuity when transitioning between idle, walking, running, turning, stopping and interacting; account for inertia and body weight.
+
+## Reaching, grasping and vehicle contact
+- For vehicle doors, vents, latches and other interactive objects, align hands to the actual moving contact target using inverse kinematics and procedural reach correction rather than a generic canned grab animation.
+- Model approach distance, shoulder/elbow/wrist limits, finger closure, grip orientation, object collision and contact constraints. The hand should visibly meet the latch before the object moves.
+- Animate grasp, force application, latch release, door/vent movement and letting go as one continuous interaction with believable resistance and momentum.
+- Support different character heights, handedness, vehicle geometry and obstructed approaches without clipping or hand teleportation.
+- Keep tactile animation distinct from actual physics: use authored motion plus contact-aware procedural correction; avoid promising perfect realism for all props.
+
+## Additional acceptance tests
+5. Compare walking, turning, stopping, stairs, slopes and injury/fatigue variants for foot sliding, posture discontinuity and collision clipping.
+6. Open/close vehicle doors and operate a latch from multiple approach angles and character sizes; confirm hand-target alignment, grip timing, physical contact and no object movement before contact.
+7. Verify frame-time budgets and scalable fallback for crowded scenes, with reproducible capture clips for review.
