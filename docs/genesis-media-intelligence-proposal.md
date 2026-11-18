@@ -46,3 +46,15 @@ Maintain a media timeline and provenance graph: shot/segment IDs, entities, temp
 
 ## Scope boundaries
 This PR documents the implementation contract only. It does not implement analyzers, modify deployment, enable autonomous agents, or establish that the current OMNI CLI accepts uploads.
+
+## Genesis game ecosystem enhancement (proposed)
+- Accept authorized game source projects or documented engine plugins; distinguish these from opaque compiled binaries and never promise universal executable patching.
+- Inventory game engine, versions, dependencies, NPC behavior trees/state machines, physics, combat, economy, ecology, and save-game schema.
+- Produce a behavior baseline: aggression triggers, idle/social routines, player proximity responses, animal needs, world simulation and non-player-to-non-player interactions.
+- Genesis proposes constrained world rules and NPC state models (needs, memory, goals, threat assessment, social relationships), with adjustable probabilities rather than default hostility.
+- Preserve authored story/combat design; provide explicit developer controls for behavior changes and measurable acceptance criteria.
+- OMNI generates isolated source changes or engine plugin patches on a review branch, with rollback and migration plans. Jackboy may run authorized static checks, unit/integration tests, simulation regression and performance benchmarks; it must not autonomously publish updates.
+- Measure NPC aggression rates, neutral interactions, persistence, frame time, memory use, save compatibility and deterministic replay across seeded simulations.
+- Start with an owned prototype such as Rise of the Kings, not third-party commercial games without permission.
+- Phase 1: read-only behavior audit. Phase 2: sample NPC natural-law plugin. Phase 3: controlled code patch and tests. Phase 4: developer-approved packaging and distribution.
+- A responsive game world does not establish sentience; Genesis is a simulation framework, not a consciousness claim.
