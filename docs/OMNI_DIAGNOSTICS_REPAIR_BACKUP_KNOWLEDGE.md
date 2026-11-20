@@ -86,3 +86,45 @@ OMNI should maintain project-scoped, permission-aware knowledge records for:
 - Do not weaken the existing CLI's offline restrictions, emergency controls, passkeys, owner approvals, CODE caps or isolation policy.
 - Do not assert the Mothership API, Lovable frontend or backup storage are connected until authenticated live checks prove it.
 - All implementation must be additive, tested, and separately reviewed; keep the existing OMNI and Double Dragon interface intact.
+
+
+## Additional reliability and intelligence capabilities
+
+### 1. Dependency graph and change-impact analysis
+Maintain a versioned graph of frontend routes, backend APIs, agents, provider/model adapters, databases, queues, secrets *references*, deployment environments and GitHub repositories. Before any repair, identify dependent systems and warn about likely collateral effects. Graph edges require verified configuration or source evidence; guessed links are labeled hypotheses.
+
+### 2. Continuous synthetic checks and drift detection
+Offer opt-in, low-cost, non-destructive checks for critical journeys (owner sign-in, delegation expiry, agent discovery, real chat, task status, GitHub read access). Compare declared API contracts and deployed revisions to current behavior. Alert on drift, failed checks and expired credentials without probing secret values or making paid provider calls without budget approval. A healthy status endpoint alone never counts as a successful user journey.
+
+### 3. Incident triage and escalation
+Deduplicate related alerts, assign severity and affected projects, establish an incident timeline, and preserve evidence for later root-cause analysis. Escalate confirmed security incidents and outages to the founder with recommended containment steps. Separate *detection*, *containment proposal*, *approved action*, and *verified recovery*.
+
+### 4. Backup completeness and disaster recovery drills
+Maintain an inventory of what is and is not covered by backups (Git source, cloud databases, uploaded assets, configuration references, migrations and deployment manifests). Define recovery-point and recovery-time objectives per system, verify offsite/isolated copies, detect silent backup failures and run owner-approved sandbox restore drills. Never label a backup 'recoverable' solely because an archive exists.
+
+### 5. Reusable repair playbooks and regression memory
+Create versioned, searchable playbooks for recurring failures, each linked to a verified incident, code revision, tests and outcome. When proposing a repair, search for related regressions and previous failed fixes. Propose a regression test so the same defect is less likely to return.
+
+### 6. Change simulation, canary rollout and automatic halt
+For approved changes, run preflight compatibility checks, dry-run migrations when supported, and deploy to staging or a small authorized canary before broader rollout. Monitor error rates, latency, budget and task failures; halt further rollout on configured thresholds. Rollback remains scoped, auditable and subject to applicable approvals.
+
+### 7. Cost and capacity troubleshooting
+Correlate actual provider invoices/usage records, quotas, task reservations, resource saturation and timeout logs. Distinguish reported usage from reconciled charges; never infer provider spending from an empty or missing record. Propose cost-saving changes with quantified evidence and preserve CODE caps.
+
+### 8. Data integrity, privacy and evidence retention
+Check for schema drift, orphaned references, failed migrations and data corruption using non-destructive methods. Apply per-project access controls, redact sensitive logs, minimize retention, and provide controlled deletion/export workflows. Protect audit evidence from unauthorized alteration while respecting privacy and legal retention obligations.
+
+### 9. Model/agent quality evaluation
+Maintain reproducible, role-specific test cases for agent routing, tool selection, hallucination detection, refusal/uncertainty handling, prompt-injection resistance, and correct source attribution. Distinguish simulated evaluation passes from real provider runs. A model update requires compatibility and regression evaluation before production enrollment.
+
+### 10. Operational dashboard and handoff
+Present one owner-focused view of active incidents, diagnostic confidence, pending repair PRs, backup coverage, restore-test recency, deployed revisions, agent capability status, CODE safety gates and unresolved dependencies. Every status links to timestamped evidence. Provide a compact handoff packet to Copilot/Lovable/Jackboy containing exact issue, reproduction, contracts, affected files, tests and authorization needs.
+
+### Acceptance extensions
+- A deliberately broken frontend-to-backend route produces an evidence-linked diagnosis and an owner-reviewed patch, not a fabricated 'fixed' status.
+- A simulated dependency change identifies downstream affected services before a proposal is approved.
+- An intentionally corrupted backup fails integrity verification, and a missing database backup leaves coverage explicitly incomplete.
+- A revoked/expired delegation prevents action even if the frontend remains signed in.
+- A failed canary halts further rollout and records a verifiable recovery plan.
+- A repeated incident surfaces its prior playbook and regression test.
+- Dashboard indicators remain 'not verified' whenever the underlying evidence is stale or absent.
